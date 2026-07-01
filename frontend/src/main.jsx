@@ -4,6 +4,7 @@ import { Chess } from "chess.js";
 import "./styles.css";
 
 const tabs = ["Home", "Play", "Bot Battle", "Puzzle", "Analysis", "Profile", "Leaderboard"];
+const API_TARGET = import.meta.env.VITE_API_TARGET || "";
 
 const pieceLabels = {
   p: "P",
@@ -120,8 +121,10 @@ function PlayPage() {
   ]);
 
   useEffect(() => {
-    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(`${protocol}://${window.location.host}/ws/game/demo-game`);
+    const wsBase = API_TARGET
+      ? API_TARGET.replace(/^http/, "ws")
+      : `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}`;
+    const ws = new WebSocket(`${wsBase}/ws/game/demo-game`);
     ws.onopen = () => setSocketStatus("online");
     ws.onclose = () => setSocketStatus("offline");
     ws.onmessage = (event) => {
