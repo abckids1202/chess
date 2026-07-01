@@ -1,0 +1,401 @@
+:root {
+  color-scheme: dark;
+  --bg-top: #0c0a1e;
+  --bg-bottom: #1e1038;
+  --panel: rgba(22, 18, 44, 0.88);
+  --panel-border: #6e50c8;
+  --light-square: #eadfc8;
+  --dark-square: #5c4b7a;
+  --gold: #ffb938;
+  --accent: #b968ff;
+  --cyan: #6ef0ff;
+  --cream: #f4ecdc;
+  --dim: #a096be;
+  --danger: #ff5c6e;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  font-family: Georgia, "Times New Roman", serif;
+  background: linear-gradient(180deg, var(--bg-top), var(--bg-bottom));
+  color: var(--cream);
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+.app-shell {
+  position: relative;
+  min-height: 100vh;
+  overflow: hidden;
+}
+
+.starfield {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.starfield span {
+  position: absolute;
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: rgba(244, 236, 220, 0.75);
+  animation: twinkle 3.5s ease-in-out infinite;
+}
+
+@keyframes twinkle {
+  0%, 100% { opacity: 0.35; transform: translateY(0); }
+  50% { opacity: 1; transform: translateY(8px); }
+}
+
+.top-nav,
+.page {
+  position: relative;
+  z-index: 1;
+}
+
+.top-nav {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 18px 34px;
+}
+
+.brand,
+.login-button,
+.nav-tabs button,
+.primary-action,
+.secondary-action,
+.action-row button,
+.chat-input button {
+  border: 1px solid rgba(255, 185, 56, 0.55);
+  border-radius: 8px;
+  color: var(--cream);
+  background: rgba(22, 18, 44, 0.78);
+  padding: 10px 14px;
+}
+
+.brand {
+  color: var(--gold);
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.nav-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: 1;
+}
+
+.nav-tabs button.active,
+.primary-action {
+  background: var(--accent);
+}
+
+.login-button {
+  background: rgba(255, 185, 56, 0.18);
+}
+
+.page {
+  width: min(1180px, calc(100vw - 36px));
+  margin: 0 auto;
+  padding: 24px 0 48px;
+}
+
+.home-layout {
+  display: grid;
+  grid-template-columns: 1fr 420px;
+  gap: 30px;
+  align-items: center;
+}
+
+.hero-copy h1,
+.placeholder-layout h1 {
+  margin: 0;
+  color: var(--gold);
+  font-size: clamp(48px, 8vw, 92px);
+}
+
+.hero-copy p {
+  max-width: 640px;
+  color: var(--dim);
+  font-size: 19px;
+  line-height: 1.6;
+}
+
+.eyebrow {
+  text-transform: uppercase;
+  font-weight: 800;
+  color: var(--cyan) !important;
+}
+
+.hero-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 24px;
+}
+
+.primary-action,
+.secondary-action {
+  min-width: 130px;
+  font-weight: 800;
+}
+
+.feature-grid,
+.placeholder-grid {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px;
+}
+
+.feature-card,
+.theme-preview,
+.game-panel {
+  border: 1px solid rgba(110, 80, 200, 0.75);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.feature-card {
+  padding: 18px;
+}
+
+.feature-card h3,
+.game-panel h2,
+.panel-section h3,
+.move-log h3,
+.chat-panel h3 {
+  margin: 0 0 10px;
+  color: var(--gold);
+}
+
+.feature-card p,
+.panel-section p,
+.move-log p,
+.chat-panel p {
+  margin: 6px 0;
+  color: var(--dim);
+}
+
+.theme-preview {
+  padding: 18px;
+  display: grid;
+  gap: 16px;
+}
+
+.mini-board {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  aspect-ratio: 1;
+  border: 3px solid var(--gold);
+}
+
+.mini-board div.light {
+  background: var(--light-square);
+}
+
+.mini-board div.dark {
+  background: var(--dark-square);
+}
+
+.preview-panel {
+  display: grid;
+  gap: 8px;
+  color: var(--dim);
+}
+
+.preview-panel strong {
+  color: var(--cream);
+}
+
+.play-layout {
+  display: grid;
+  grid-template-columns: minmax(440px, 640px) minmax(320px, 1fr);
+  gap: 38px;
+  align-items: start;
+}
+
+.turn-line {
+  height: 28px;
+  color: var(--dim);
+  font-weight: 800;
+}
+
+.chess-board {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  width: min(640px, 100%);
+  aspect-ratio: 1;
+  border: 6px solid #181032;
+  outline: 2px solid var(--gold);
+  box-shadow: 0 0 42px rgba(185, 104, 255, 0.35);
+}
+
+.square {
+  display: grid;
+  place-items: center;
+  border: 0;
+  min-width: 0;
+  min-height: 0;
+}
+
+.square.light {
+  background: var(--light-square);
+}
+
+.square.dark {
+  background: var(--dark-square);
+}
+
+.square.selected {
+  box-shadow: inset 0 0 0 4px var(--cyan);
+}
+
+.square.premove {
+  box-shadow: inset 0 0 0 999px rgba(255, 50, 70, 0.34), inset 0 0 0 4px var(--danger);
+}
+
+.piece {
+  display: grid;
+  place-items: center;
+  width: 70%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  font-weight: 900;
+  font-size: clamp(16px, 3vw, 30px);
+  text-shadow: 0 2px 5px rgba(0, 0, 0, 0.55);
+}
+
+.piece.w {
+  color: #181032;
+  background: rgba(244, 236, 220, 0.82);
+}
+
+.piece.b {
+  color: var(--cream);
+  background: rgba(22, 18, 44, 0.86);
+}
+
+.game-panel {
+  padding: 22px;
+}
+
+.socket-pill {
+  display: inline-block;
+  margin-bottom: 16px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(110, 240, 255, 0.13);
+  color: var(--cyan);
+  font-size: 13px;
+}
+
+.timer-block {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.timer-block.active {
+  outline: 2px solid var(--gold);
+}
+
+.timer-block strong {
+  font-size: 30px;
+}
+
+.panel-section,
+.move-log,
+.chat-panel {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(110, 80, 200, 0.55);
+}
+
+.move-log {
+  min-height: 130px;
+  max-height: 190px;
+  overflow: auto;
+}
+
+.action-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.chat-input {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.chat-input input {
+  min-width: 0;
+  border: 1px solid rgba(110, 80, 200, 0.75);
+  border-radius: 8px;
+  padding: 10px;
+  background: rgba(12, 10, 30, 0.76);
+  color: var(--cream);
+}
+
+.placeholder-layout {
+  min-height: 70vh;
+}
+
+.placeholder-grid {
+  grid-template-columns: repeat(3, 1fr);
+  margin-top: 24px;
+}
+
+@media (max-width: 920px) {
+  .top-nav {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .home-layout,
+  .play-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .feature-grid,
+  .placeholder-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 560px) {
+  .page {
+    width: min(100vw - 20px, 1180px);
+  }
+
+  .feature-grid,
+  .placeholder-grid,
+  .action-row {
+    grid-template-columns: 1fr;
+  }
+}
