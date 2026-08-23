@@ -1,0 +1,26 @@
+seed: 42
+
+data:
+  train_dir: data/shards/policy/train
+  validation_fraction: 0.05
+  rating_mean: 1500.0
+  rating_std: 400.0
+
+model:
+  channels: 96
+  residual_blocks: 6
+  embedding_dim: 256
+  rating_embedding_dim: 32
+  hidden_dim: 512
+  dropout: 0.1
+
+training:
+  epochs: 3
+  batch_size: 256
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  num_workers: 0
+  device: auto
+
+checkpoint:
+  output_dir: runs

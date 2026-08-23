@@ -13,7 +13,11 @@ CREATE TABLE IF NOT EXISTS users (
     username TEXT NOT NULL UNIQUE,
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
+    display_name TEXT,
     avatar TEXT,
+    bio TEXT,
+    favorite_theme TEXT,
+    google_sub TEXT UNIQUE,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -81,6 +85,49 @@ CREATE TABLE IF NOT EXISTS memes (
     caption TEXT,
     rarity TEXT NOT NULL DEFAULT 'common'
 );
+
+CREATE TABLE IF NOT EXISTS local_profile (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    username TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS local_games (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    white_name TEXT NOT NULL,
+    black_name TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    result TEXT NOT NULL DEFAULT '*',
+    pgn TEXT,
+    final_fen TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ended_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS local_moves (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    game_id INTEGER NOT NULL,
+    ply INTEGER NOT NULL,
+    uci TEXT NOT NULL,
+    san TEXT NOT NULL,
+    fen_after TEXT NOT NULL,
+    time_left INTEGER,
+    FOREIGN KEY (game_id) REFERENCES local_games(id)
+);
+
+CREATE TABLE IF NOT EXISTS local_puzzle_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    puzzle_id TEXT NOT NULL,
+    correct INTEGER NOT NULL CHECK (correct IN (0, 1)),
+    attempts INTEGER NOT NULL DEFAULT 1,
+    time_taken INTEGER,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
@@ -94,7 +141,28 @@ def get_connection():
 def init_db():
     with get_connection() as conn:
         conn.executescript(SCHEMA)
+        conn.execute("INSERT OR IGNORE INTO local_profile (id, username) VALUES (1, 'Player')")
+        _ensure_user_columns(conn)
         conn.commit()
+
+
+def _ensure_user_columns(conn):
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+    columns = {
+        "display_name": "TEXT",
+        "bio": "TEXT",
+        "favorite_theme": "TEXT",
+        "google_sub": "TEXT UNIQUE",
+    }
+    for name, definition in columns.items():
+        if name not in existing:
+            try:
+                conn.execute(f"ALTER TABLE users ADD COLUMN {name} {definition}")
+            except sqlite3.OperationalError:
+                if name == "google_sub":
+                    conn.execute("ALTER TABLE users ADD COLUMN google_sub TEXT")
+                else:
+                    raise
 
 
 def row_to_dict(row):

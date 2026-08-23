@@ -1,22 +1,105 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Chess } from "chess.js";
+import { BOT_DEFINITIONS, BOT_LEVELS, BOT_PERSONALITIES, STOCKFISH_LEVELS } from "./bots";
+import { get_legal_moves, make_move } from "./chessEngine";
+import { PuzzleManager, loadPuzzles } from "./puzzleManager";
 import "./styles.css";
 
 const tabs = ["Home", "Play", "Bot Battle", "Puzzle", "Analysis", "Profile", "Leaderboard"];
 const API_TARGET = import.meta.env.VITE_API_TARGET || "";
 
-const pieceLabels = {
-  p: "P",
-  n: "N",
-  b: "B",
-  r: "R",
-  q: "Q",
-  k: "K"
+const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
+const pieceCodes = { p: "P", n: "N", b: "B", r: "R", q: "Q", k: "K" };
+const INITIAL_CLOCK = 10 * 60;
+const SOUND_FILES = {
+  move: "/assets/sounds/move.mp3",
+  capture: "/assets/sounds/capture.mp3",
+  castle: "/assets/sounds/castle.mp3",
+  check: "/assets/sounds/check.mp3",
+  checkmate: "/assets/sounds/checkmate.webm",
+  illegal: "/assets/sounds/illegal.mp3",
+  premove: "/assets/sounds/premove.mp3",
+  promote: "/assets/sounds/promote.mp3",
+  start: "/assets/sounds/start.mp3",
+  notify: "/assets/sounds/notify.mp3"
 };
+
+function playSound(name) {
+  const src = SOUND_FILES[name];
+  if (!src) {
+    return;
+  }
+  const audio = new Audio(src);
+  audio.volume = 0.55;
+  audio.play().catch(() => {});
+}
+
+function formatClock(seconds) {
+  const safe = Math.max(0, seconds);
+  const minutes = Math.floor(safe / 60);
+  const secs = safe % 60;
+  return `${minutes}:${String(secs).padStart(2, "0")}`;
+}
+
+async function apiFetch(path, options = {}) {
+  const response = await fetch(`${API_TARGET}${path}`, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...(options.headers || {})
+    }
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || "Request failed");
+  }
+  return data;
+}
 
 function App() {
   const [page, setPage] = useState("Home");
+  const [authOpen, setAuthOpen] = useState(false);
+  const [token, setToken] = useState(() => localStorage.getItem("chess_v2_token") || "");
+  const [user, setUser] = useState(null);
+  const [botConfig, setBotConfig] = useState(null);
+  const [localStats, setLocalStats] = useState(null);
+
+  function refreshLocalStats() {
+    apiFetch("/api/local/stats").then(setLocalStats).catch(() => {});
+  }
+
+  useEffect(() => {
+    if (!token) {
+      setUser(null);
+      return;
+    }
+    apiFetch("/api/auth/me", {
+      headers: { Authorization: `Bearer ${token}` }
+    })
+      .then((data) => setUser(data.user))
+      .catch(() => {
+        localStorage.removeItem("chess_v2_token");
+        setToken("");
+      });
+  }, [token]);
+
+  useEffect(() => {
+    refreshLocalStats();
+  }, []);
+
+  function handleAuth(data) {
+    localStorage.setItem("chess_v2_token", data.token);
+    setToken(data.token);
+    setUser(data.user);
+    setAuthOpen(false);
+  }
+
+  function logout() {
+    localStorage.removeItem("chess_v2_token");
+    setToken("");
+    setUser(null);
+  }
 
   return (
     <main className="app-shell">
@@ -34,16 +117,33 @@ function App() {
             </button>
           ))}
         </div>
-        <button className="login-button">Login</button>
+        {user ? (
+          <button className="login-button" onClick={() => setPage("Profile")}>
+            {user.display_name || user.username}
+          </button>
+        ) : (
+          <button className="login-button" onClick={() => setAuthOpen(true)}>Login</button>
+        )}
       </nav>
 
-      {page === "Home" && <HomePage onPlay={() => setPage("Play")} />}
-      {page === "Play" && <PlayPage />}
-      {page === "Bot Battle" && <BotBattlePage />}
+      {page === "Home" && <HomePage onPlay={() => { setBotConfig(null); setPage("Play"); }} onLogin={() => setAuthOpen(true)} />}
+      {page === "Play" && <PlayPage botConfig={botConfig} />}
+      {page === "Bot Battle" && <BotBattlePage onStart={(config) => { setBotConfig(config); setPage("Play"); }} />}
       {page === "Puzzle" && <PuzzlePage />}
       {page === "Analysis" && <AnalysisPage />}
-      {page === "Profile" && <ProfilePage />}
-      {page === "Leaderboard" && <LeaderboardPage />}
+      {page === "Profile" && (
+        <ProfilePage
+          user={user}
+          localStats={localStats}
+          token={token}
+          onLogin={() => setAuthOpen(true)}
+          onLogout={logout}
+          onUser={setUser}
+          onRefresh={refreshLocalStats}
+        />
+      )}
+      {page === "Leaderboard" && <LeaderboardPage localStats={localStats} />}
+      {authOpen && <AuthModal onClose={() => setAuthOpen(false)} onAuth={handleAuth} />}
     </main>
   );
 }
@@ -65,7 +165,7 @@ function Starfield() {
   );
 }
 
-function HomePage({ onPlay }) {
+function HomePage({ onPlay, onLogin }) {
   return (
     <section className="page home-layout">
       <div className="hero-copy">
@@ -76,7 +176,7 @@ function HomePage({ onPlay }) {
         </p>
         <div className="hero-actions">
           <button className="primary-action" onClick={onPlay}>Play</button>
-          <button className="secondary-action">Login</button>
+          <button className="secondary-action" onClick={onLogin}>Login</button>
         </div>
       </div>
       <ThemePreview />
@@ -107,13 +207,18 @@ function ThemePreview() {
   );
 }
 
-function PlayPage() {
+function PlayPage({ botConfig }) {
   const gameRef = useRef(new Chess());
+  const localGamePromise = useRef(null);
+  const finishedRef = useRef(false);
   const [board, setBoard] = useState(gameRef.current.board());
   const [selected, setSelected] = useState(null);
+  const [legalTargets, setLegalTargets] = useState([]);
   const [moves, setMoves] = useState([]);
   const [captured, setCaptured] = useState({ w: [], b: [] });
   const [premove, setPremove] = useState(null);
+  const [timeLeft, setTimeLeft] = useState({ w: INITIAL_CLOCK, b: INITIAL_CLOCK });
+  const [gameOver, setGameOver] = useState("");
   const [socketStatus, setSocketStatus] = useState("offline");
   const [chat, setChat] = useState([
     { from: "system", text: "Welcome to CHESS V2." },
@@ -142,64 +247,317 @@ function PlayPage() {
 
   const turn = gameRef.current.turn() === "w" ? "WHITE" : "BLACK";
   const moveHistory = gameRef.current.history();
+  const botToMove = botConfig && gameRef.current.turn() === botConfig.color;
+  const legalTargetSet = new Set(legalTargets.map((move) => move.to));
+
+  function createLocalGame() {
+    const botName = botConfig?.label || "Opponent";
+    const whiteName = botConfig?.color === "w" ? botName : "Player";
+    const blackName = botConfig?.color === "b" ? botName : "Player";
+    localGamePromise.current = apiFetch("/api/local/games", {
+      method: "POST",
+      body: JSON.stringify({
+        white_name: whiteName,
+        black_name: blackName,
+        mode: botConfig ? "bot" : "local"
+      })
+    }).catch(() => null);
+    finishedRef.current = false;
+  }
+
+  useEffect(() => {
+    createLocalGame();
+    return () => {
+      localGamePromise.current = null;
+    };
+  }, [botConfig]);
+
+  useEffect(() => {
+    const clearOnEscape = (event) => {
+      if (event.key === "Escape") {
+        setSelected(null);
+        setLegalTargets([]);
+        setPremove(null);
+      }
+    };
+    window.addEventListener("keydown", clearOnEscape);
+    return () => window.removeEventListener("keydown", clearOnEscape);
+  }, []);
+
+  async function saveMove(move) {
+    const game = await localGamePromise.current;
+    if (!game) {
+      return;
+    }
+    apiFetch(`/api/local/games/${game.id}/moves`, {
+      method: "POST",
+      body: JSON.stringify({
+        ply: gameRef.current.history().length - 1,
+        uci: `${move.from}${move.to}${move.promotion || ""}`,
+        san: move.san,
+        fen_after: gameRef.current.fen()
+      })
+    }).catch(() => {});
+  }
+
+  async function finishLocalGame(result) {
+    if (finishedRef.current) {
+      return;
+    }
+    finishedRef.current = true;
+    const game = await localGamePromise.current;
+    if (!game) {
+      return;
+    }
+    apiFetch(`/api/local/games/${game.id}/finish`, {
+      method: "POST",
+      body: JSON.stringify({
+        result,
+        pgn: gameRef.current.pgn(),
+        final_fen: gameRef.current.fen()
+      })
+    }).catch(() => {});
+  }
+
+  useEffect(() => {
+    if (gameOver || gameRef.current.isGameOver()) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      const active = gameRef.current.turn();
+      setTimeLeft((current) => {
+        if (current[active] <= 0) {
+          return current;
+        }
+        const nextValue = Math.max(0, current[active] - 1);
+        if (nextValue === 10) {
+          playSound("notify");
+        }
+        if (nextValue === 0) {
+          const winner = active === "w" ? "Black" : "White";
+          setGameOver(`${winner} wins on time`);
+          finishLocalGame(active === "w" ? "0-1" : "1-0");
+        }
+        return { ...current, [active]: nextValue };
+      });
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [gameOver, board]);
 
   function squareName(row, col) {
     return "abcdefgh"[col] + (8 - row);
   }
 
   function handleSquare(row, col) {
+    if (gameOver || gameRef.current.isGameOver()) {
+      return;
+    }
     const square = squareName(row, col);
     const piece = gameRef.current.get(square);
 
+    if (botToMove) {
+      handlePremove(square, piece);
+      return;
+    }
+
     if (!selected) {
       if (piece && piece.color === gameRef.current.turn()) {
-        setSelected(square);
+        selectSquare(square);
       } else if (piece) {
-        setPremove({ from: square, to: square });
+        playSound("illegal");
       }
+      return;
+    }
+
+    if (selected === square) {
+      setSelected(null);
+      setLegalTargets([]);
       return;
     }
 
     const before = gameRef.current.get(square);
-    const move = gameRef.current.move({ from: selected, to: square, promotion: "q" });
+    const move = make_move(gameRef.current, { from: selected, to: square, promotion: "q" });
     if (!move) {
       if (piece && piece.color === gameRef.current.turn()) {
-        setSelected(square);
+        selectSquare(square);
       } else {
-        setPremove({ from: selected, to: square });
+        playSound("illegal");
         setSelected(null);
+        setLegalTargets([]);
       }
       return;
     }
 
+    commitMove(move, before);
+  }
+
+  function clearSelection() {
+    setSelected(null);
+    setLegalTargets([]);
+  }
+
+  function selectSquare(square) {
+    setSelected(square);
+    setLegalTargets(get_legal_moves(gameRef.current, gameRef.current.turn()).filter((move) => move.from === square));
+  }
+
+  function selectSquareForColor(square, color) {
+    setSelected(square);
+    setLegalTargets(get_legal_moves(gameRef.current, color).filter((move) => move.from === square));
+  }
+
+  function handlePremove(square, piece) {
+    const humanColor = botConfig?.color === "b" ? "w" : "b";
+    if (!selected) {
+      if (piece && piece.color === humanColor) {
+        selectSquareForColor(square, humanColor);
+      } else {
+        playSound("illegal");
+      }
+      return;
+    }
+    if (selected === square) {
+      setSelected(null);
+      setLegalTargets([]);
+      setPremove(null);
+      return;
+    }
+    setPremove({ from: selected, to: square });
+    setSelected(null);
+    setLegalTargets([]);
+    playSound("premove");
+  }
+
+  function commitMove(move, before = null, options = {}) {
     if (before || move.captured) {
+      const capturedColor = move.color === "w" ? "b" : "w";
+      const capturedType = move.captured || before?.type;
       setCaptured((state) => ({
         ...state,
-        [move.color === "w" ? "b" : "w"]: [
-          ...state[move.color === "w" ? "b" : "w"],
-          move.captured || before.type
+        [capturedColor]: [
+          ...state[capturedColor],
+          `${capturedColor}${pieceCodes[capturedType]}`
         ]
       }));
     }
+    if (move.captured || before) {
+      playSound("capture");
+    } else if (move.flags?.includes("k") || move.flags?.includes("q")) {
+      playSound("castle");
+    } else {
+      playSound("move");
+    }
+    if (move.promotion) {
+      playSound("promote");
+    }
+    if (gameRef.current.isCheckmate()) {
+      playSound("checkmate");
+      setGameOver(`${move.color === "w" ? "White" : "Black"} wins by checkmate`);
+      finishLocalGame(move.color === "w" ? "1-0" : "0-1");
+    } else if (gameRef.current.isCheck()) {
+      playSound("check");
+    } else if (gameRef.current.isDraw()) {
+      setGameOver("Draw");
+      finishLocalGame("1/2-1/2");
+    }
     setSelected(null);
-    setPremove(null);
+    setLegalTargets([]);
+    if (options.clearPremove !== false) {
+      setPremove(null);
+    }
     setBoard(gameRef.current.board());
     setMoves(gameRef.current.history({ verbose: true }));
+    saveMove(move);
   }
+
+  useEffect(() => {
+    if (!botToMove || gameRef.current.isGameOver()) {
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      const legalMoves = get_legal_moves(gameRef.current, botConfig.color);
+      if (!legalMoves.length) {
+        return;
+      }
+      try {
+        const chosenMove = await Promise.resolve(
+          botConfig.choose_move(gameRef.current, legalMoves, botConfig.color)
+        );
+        if (cancelled || !chosenMove || gameRef.current.isGameOver()) {
+          return;
+        }
+      const before = gameRef.current.get(chosenMove.to);
+      const move = make_move(gameRef.current, chosenMove);
+      if (move) {
+        commitMove(move, before, { clearPremove: false });
+      }
+      } catch (error) {
+        if (!cancelled) {
+          setGameOver(error.message || "Bot move failed");
+          playSound("illegal");
+        }
+      }
+    }, 450);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [botToMove, board, botConfig]);
+
+  useEffect(() => {
+    if (!premove || !botConfig || botToMove || gameRef.current.isGameOver()) {
+      return;
+    }
+    const legalMoves = get_legal_moves(gameRef.current, gameRef.current.turn());
+    const chosenMove = legalMoves.find((move) => move.from === premove.from && move.to === premove.to);
+    if (!chosenMove) {
+      setPremove(null);
+      playSound("illegal");
+      return;
+    }
+    const before = gameRef.current.get(chosenMove.to);
+    const move = make_move(gameRef.current, { ...chosenMove, promotion: chosenMove.promotion || "q" });
+    if (move) {
+      commitMove(move, before);
+    }
+  }, [premove, botToMove, botConfig, board]);
 
   function resetGame() {
     gameRef.current = new Chess();
     setBoard(gameRef.current.board());
     setSelected(null);
+    setLegalTargets([]);
     setPremove(null);
     setCaptured({ w: [], b: [] });
+    setTimeLeft({ w: INITIAL_CLOCK, b: INITIAL_CLOCK });
+    setGameOver("");
     setMoves([]);
+    createLocalGame();
   }
 
-  function undoMove() {
+  async function undoMove() {
+    const history = gameRef.current.history({ verbose: true });
+    const lastMove = history[history.length - 1];
     gameRef.current.undo();
+    const game = await localGamePromise.current;
+    if (game) {
+      apiFetch(`/api/local/games/${game.id}/moves/last`, { method: "DELETE" }).catch(() => {});
+    }
+    if (lastMove?.captured) {
+      const capturedColor = lastMove.color === "w" ? "b" : "w";
+      setCaptured((state) => ({
+        ...state,
+        [capturedColor]: state[capturedColor].slice(0, -1)
+      }));
+    }
     setBoard(gameRef.current.board());
     setMoves(gameRef.current.history({ verbose: true }));
+    setSelected(null);
+    setLegalTargets([]);
+    setPremove(null);
+    setGameOver("");
+    finishedRef.current = false;
   }
 
   return (
@@ -210,19 +568,27 @@ function PlayPage() {
           board={board}
           selected={selected}
           premove={premove}
+          legalTargets={legalTargetSet}
           onSquare={handleSquare}
+          onClearSelection={clearSelection}
         />
       </div>
       <aside className="game-panel">
         <h2>CHESS V2</h2>
+        {botConfig && <div className="socket-pill">Bot: {botConfig.label}</div>}
         <div className="socket-pill">Realtime: {socketStatus}</div>
-        <TimerBlock label="BLACK" time="10:00" active={turn === "BLACK"} />
-        <TimerBlock label="WHITE" time="10:00" active={turn === "WHITE"} />
+        {gameOver && <div className="socket-pill danger-pill">{gameOver}</div>}
+        <TimerBlock label="BLACK" time={formatClock(timeLeft.b)} active={turn === "BLACK"} />
+        <TimerBlock label="WHITE" time={formatClock(timeLeft.w)} active={turn === "WHITE"} />
         <CapturedPieces captured={captured} />
         <MoveHistory moves={moveHistory} />
         <div className="action-row">
-          <button>Resign</button>
-          <button>Draw</button>
+          <button onClick={() => {
+            const humanColor = botConfig?.color === "w" ? "b" : "w";
+            setGameOver("You resigned");
+            finishLocalGame(humanColor === "w" ? "0-1" : "1-0");
+          }}>Resign</button>
+          <button onClick={() => { setGameOver("Draw agreed"); finishLocalGame("1/2-1/2"); }}>Draw</button>
           <button onClick={undoMove}>Undo</button>
           <button onClick={resetGame}>Reset</button>
         </div>
@@ -232,31 +598,39 @@ function PlayPage() {
   );
 }
 
-function ChessBoard({ board, selected, premove, onSquare }) {
+function ChessBoard({ board, selected, premove, legalTargets, onSquare, onClearSelection }) {
   return (
-    <div className="chess-board">
+    <div className="chess-board" onContextMenu={(event) => { event.preventDefault(); onClearSelection?.(); }}>
       {board.flatMap((row, rowIndex) =>
         row.map((piece, colIndex) => {
           const square = "abcdefgh"[colIndex] + (8 - rowIndex);
           const isLight = (rowIndex + colIndex) % 2 === 0;
           const isSelected = selected === square;
           const isPremove = premove && (premove.from === square || premove.to === square);
+          const isLegal = legalTargets.has(square);
+          const isCaptureTarget = isLegal && piece;
           return (
             <button
               className={[
                 "square",
                 isLight ? "light" : "dark",
                 isSelected ? "selected" : "",
-                isPremove ? "premove" : ""
+                isPremove ? "premove" : "",
+                isLegal ? "legal-target" : "",
+                isCaptureTarget ? "capture-target" : ""
               ].join(" ")}
               key={square}
               onClick={() => onSquare(rowIndex, colIndex)}
             >
               {piece && (
-                <span className={`piece ${piece.color}`}>
-                  {piece.color.toUpperCase()}{pieceLabels[piece.type]}
-                </span>
+                <img
+                  className="piece-img"
+                  src={`/assets/pieces/${piece.color}${pieceCodes[piece.type]}.png`}
+                  alt={`${piece.color === "w" ? "White" : "Black"} ${piece.type}`}
+                  draggable="false"
+                />
               )}
+              {isLegal && !piece && <span className="legal-dot" />}
             </button>
           );
         })
@@ -278,9 +652,22 @@ function CapturedPieces({ captured }) {
   return (
     <section className="panel-section">
       <h3>Captured pieces</h3>
-      <p>White captured: {captured.b.join(" ") || "none"}</p>
-      <p>Black captured: {captured.w.join(" ") || "none"}</p>
+      <CapturedRow label="White captured" pieces={captured.b} />
+      <CapturedRow label="Black captured" pieces={captured.w} />
     </section>
+  );
+}
+
+function CapturedRow({ label, pieces }) {
+  return (
+    <div className="captured-row">
+      <span>{label}:</span>
+      <div className="captured-pieces">
+        {pieces.length ? pieces.map((piece, index) => (
+          <img src={`/assets/pieces/${piece}.png`} alt={piece} key={`${piece}-${index}`} />
+        )) : <span>none</span>}
+      </div>
+    </div>
   );
 }
 
@@ -312,62 +699,529 @@ function ChatPanel({ chat }) {
   );
 }
 
-function BotBattlePage() {
+function AuthModal({ onClose, onAuth }) {
+  const [mode, setMode] = useState("login");
+  const [error, setError] = useState("");
+  const [form, setForm] = useState({
+    login: "",
+    username: "",
+    email: "",
+    password: "",
+    display_name: "",
+    favorite_theme: "Royal cosmic"
+  });
+
+  useEffect(() => {
+    if (!GOOGLE_CLIENT_ID || mode !== "login") {
+      return;
+    }
+    const scriptId = "google-identity-script";
+    if (!document.getElementById(scriptId)) {
+      const script = document.createElement("script");
+      script.id = scriptId;
+      script.src = "https://accounts.google.com/gsi/client";
+      script.async = true;
+      document.head.appendChild(script);
+    }
+  }, [mode]);
+
+  function update(key, value) {
+    setForm((current) => ({ ...current, [key]: value }));
+  }
+
+  async function submit(event) {
+    event.preventDefault();
+    setError("");
+    try {
+      const path = mode === "login" ? "/api/auth/login" : "/api/auth/register";
+      const payload = mode === "login"
+        ? { login: form.login, password: form.password }
+        : {
+            username: form.username,
+            email: form.email,
+            password: form.password,
+            display_name: form.display_name || null,
+            favorite_theme: form.favorite_theme || null
+          };
+      const data = await apiFetch(path, {
+        method: "POST",
+        body: JSON.stringify(payload)
+      });
+      onAuth(data);
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function googleSignIn() {
+    setError("");
+    if (!GOOGLE_CLIENT_ID) {
+      setError("Add VITE_GOOGLE_CLIENT_ID and GOOGLE_CLIENT_ID to enable Google auth.");
+      return;
+    }
+    if (!window.google?.accounts?.id) {
+      setError("Google auth is still loading. Try again in a second.");
+      return;
+    }
+    window.google.accounts.id.initialize({
+      client_id: GOOGLE_CLIENT_ID,
+      callback: async (response) => {
+        try {
+          const data = await apiFetch("/api/auth/google", {
+            method: "POST",
+            body: JSON.stringify({ credential: response.credential })
+          });
+          onAuth(data);
+        } catch (err) {
+          setError(err.message);
+        }
+      }
+    });
+    window.google.accounts.id.prompt();
+  }
+
   return (
-    <PlaceholderPage
-      title="Bot Battle"
-      items={["Choose bot level", "Choose bot personality", "Start game"]}
-    />
+    <div className="modal-backdrop">
+      <section className="auth-modal">
+        <button className="modal-close" onClick={onClose}>×</button>
+        <h2>{mode === "login" ? "Login" : "Register"}</h2>
+        <div className="auth-tabs">
+          <button className={mode === "login" ? "active" : ""} onClick={() => setMode("login")}>Login</button>
+          <button className={mode === "register" ? "active" : ""} onClick={() => setMode("register")}>Register</button>
+        </div>
+        <form className="auth-form" onSubmit={submit}>
+          {mode === "login" ? (
+            <label>
+              Username or email
+              <input value={form.login} onChange={(event) => update("login", event.target.value)} required />
+            </label>
+          ) : (
+            <>
+              <label>
+                Username
+                <input value={form.username} onChange={(event) => update("username", event.target.value)} required />
+              </label>
+              <label>
+                Email
+                <input type="email" value={form.email} onChange={(event) => update("email", event.target.value)} required />
+              </label>
+              <label>
+                Display name optional
+                <input value={form.display_name} onChange={(event) => update("display_name", event.target.value)} />
+              </label>
+            </>
+          )}
+          <label>
+            Password
+            <input type="password" value={form.password} onChange={(event) => update("password", event.target.value)} required />
+          </label>
+          {error && <p className="form-error">{error}</p>}
+          <button className="primary-action" type="submit">{mode === "login" ? "Login" : "Create account"}</button>
+        </form>
+        <button className="google-button" onClick={googleSignIn}>Continue with Google</button>
+      </section>
+    </div>
+  );
+}
+
+function BotBattlePage({ onStart }) {
+  const [botKey, setBotKey] = useState("random");
+  const [level, setLevel] = useState(1);
+  const [personality, setPersonality] = useState("gambler");
+  const [botColor, setBotColor] = useState("b");
+  const selectedBot = BOT_DEFINITIONS[botKey];
+
+  return (
+    <section className="page tool-layout">
+      <h1>Bot Battle</h1>
+      <div className="tool-grid">
+        <article className="tool-panel">
+          <h3>Choose bot level</h3>
+          <select value={botKey} onChange={(event) => { setBotKey(event.target.value); setLevel(1); }}>
+            {Object.entries(BOT_DEFINITIONS).map(([key, bot]) => (
+              <option value={key} key={key}>{bot.label}</option>
+            ))}
+          </select>
+          <p>{selectedBot.description}</p>
+        </article>
+        <article className="tool-panel">
+          <h3>Difficulty</h3>
+          <select value={level} onChange={(event) => setLevel(Number(event.target.value))}>
+            {botKey === "stockfish"
+              ? STOCKFISH_LEVELS.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)
+              : Object.keys(BOT_LEVELS).map((botLevel) => <option value={botLevel} key={botLevel}>Level {botLevel}</option>)}
+          </select>
+          <p>{botKey === "stockfish" ? "Uses the local Stockfish skill setting." : "Higher levels make fewer random moves."}</p>
+        </article>
+        <article className="tool-panel">
+          <h3>Choose bot personality</h3>
+          <select value={personality} onChange={(event) => setPersonality(event.target.value)}>
+            {Object.entries(BOT_PERSONALITIES).map(([key, botPersonality]) => (
+              <option value={key} key={key}>{botPersonality.label}</option>
+            ))}
+          </select>
+        </article>
+        <article className="tool-panel">
+          <h3>Choose side</h3>
+          <select value={botColor} onChange={(event) => setBotColor(event.target.value)}>
+            <option value="b">You play White</option>
+            <option value="w">You play Black</option>
+          </select>
+        </article>
+        <article className="tool-panel">
+          <h3>Start game</h3>
+          <p>{botColor === "b" ? "You play white. The bot plays black." : "The bot plays white. You play black."}</p>
+          <button
+            className="primary-action"
+            onClick={() => onStart({
+              ...selectedBot.create(level, personality),
+              label: selectedBot.label,
+              key: botKey,
+              level,
+              personality,
+              color: botColor
+            })}
+          >
+            Start bot battle
+          </button>
+        </article>
+      </div>
+    </section>
   );
 }
 
 function PuzzlePage() {
+  const managerRef = useRef(new PuzzleManager());
+  const [puzzles, setPuzzles] = useState([]);
+  const [currentPuzzle, setCurrentPuzzle] = useState(null);
+  const [board, setBoard] = useState(new Chess().board());
+  const [selected, setSelected] = useState(null);
+  const [legalTargets, setLegalTargets] = useState([]);
+  const [feedback, setFeedback] = useState("Choose a puzzle to begin.");
+  const [attempts, setAttempts] = useState(0);
+  const [showHint, setShowHint] = useState(false);
+  const [complete, setComplete] = useState(false);
+  const legalTargetSet = new Set(legalTargets.map((move) => move.to));
+  const categories = [...new Set(puzzles.flatMap((puzzle) => puzzle.themes || []))];
+
+  useEffect(() => {
+    loadPuzzles()
+      .then((loadedPuzzles) => {
+        setPuzzles(loadedPuzzles);
+        managerRef.current = new PuzzleManager(loadedPuzzles);
+        if (loadedPuzzles.length) {
+          startPuzzle(loadedPuzzles[0].id, loadedPuzzles);
+        } else {
+          setFeedback("No validated puzzles have been imported yet.");
+        }
+      })
+      .catch((error) => setFeedback(error.message));
+  }, []);
+
+  function startPuzzle(puzzleId, sourcePuzzles = puzzles) {
+    const manager = new PuzzleManager(sourcePuzzles);
+    const puzzle = manager.start_puzzle(puzzleId);
+    managerRef.current = manager;
+    setCurrentPuzzle(puzzle);
+    setBoard(manager.game.board());
+    setSelected(null);
+    setLegalTargets([]);
+    setAttempts(0);
+    setShowHint(false);
+    setComplete(false);
+    setFeedback("Find the forcing move.");
+    playSound("start");
+  }
+
+  function squareName(row, col) {
+    return "abcdefgh"[col] + (8 - row);
+  }
+
+  function selectPuzzleSquare(square) {
+    const manager = managerRef.current;
+    setSelected(square);
+    setLegalTargets(manager.legal_moves().filter((move) => move.from === square));
+  }
+
+  function handlePuzzleSquare(row, col) {
+    const manager = managerRef.current;
+    if (!manager.game || complete) {
+      return;
+    }
+    const square = squareName(row, col);
+    const piece = manager.game.get(square);
+
+    if (!selected) {
+      if (piece && piece.color === manager.game.turn()) {
+        selectPuzzleSquare(square);
+      }
+      return;
+    }
+
+    if (selected === square) {
+      setSelected(null);
+      setLegalTargets([]);
+      return;
+    }
+
+    const result = manager.check_move({ from: selected, to: square, promotion: "q" });
+    setAttempts((count) => count + 1);
+    const attemptNumber = attempts + 1;
+    setSelected(null);
+    setLegalTargets([]);
+
+    if (!result.ok || result.complete) {
+      apiFetch("/api/local/puzzle-attempts", {
+        method: "POST",
+        body: JSON.stringify({
+          puzzle_id: currentPuzzle.id,
+          correct: result.complete,
+          attempts: attemptNumber
+        })
+      }).catch(() => {});
+    }
+
+    if (!result.ok) {
+      setFeedback("Not quite. Look for a forcing move: check, capture, or threat.");
+      playSound("illegal");
+      return;
+    }
+
+    playSound(result.complete ? "checkmate" : "move");
+    setBoard(manager.game.board());
+
+    if (result.complete) {
+      setComplete(true);
+      setFeedback("Puzzle solved.");
+      return;
+    }
+
+    setFeedback("Correct. Forced reply incoming.");
+    window.setTimeout(() => {
+      const reply = manager.play_forced_reply();
+      if (reply) {
+        playSound(reply.captured ? "capture" : "move");
+        setBoard(manager.game.board());
+        setFeedback("Now find the next winning move.");
+      }
+      if (manager.is_complete()) {
+        setComplete(true);
+        setFeedback("Puzzle solved.");
+      }
+    }, 450);
+  }
+
+  function nextPuzzle() {
+    if (!puzzles.length || !currentPuzzle) {
+      return;
+    }
+    const currentIndex = puzzles.findIndex((puzzle) => puzzle.id === currentPuzzle.id);
+    const next = puzzles[(currentIndex + 1) % puzzles.length];
+    startPuzzle(next.id);
+  }
+
   return (
-    <PlaceholderPage
-      title="Puzzle"
-      items={["Daily puzzle", "Puzzle categories", "Streak system"]}
-    />
+    <section className="page tool-layout">
+      <h1>Puzzle</h1>
+      <div className="puzzle-layout">
+        <div className="puzzle-board-zone">
+          <ChessBoard
+            board={board}
+            selected={selected}
+            premove={null}
+            legalTargets={legalTargetSet}
+            onSquare={handlePuzzleSquare}
+          />
+        </div>
+        <aside className="game-panel puzzle-panel">
+          <h2>{currentPuzzle?.title || "Validated puzzles"}</h2>
+          <div className="puzzle-meta">
+            <span>Rating {currentPuzzle?.rating || "-"}</span>
+            <span>{currentPuzzle ? new Chess(currentPuzzle.solver_fen).turn() === "w" ? "white to move" : "black to move" : "-"}</span>
+            <span>Attempts {attempts}</span>
+          </div>
+          <div className="tag-row">
+            {(currentPuzzle?.themes || []).map((tag) => <span key={tag}>{tag}</span>)}
+          </div>
+          <p className={complete ? "feedback-good" : "feedback-line"}>{feedback}</p>
+          {showHint && <p className="hint-box">{currentPuzzle?.hint}</p>}
+          {complete && <p className="explanation-box">{currentPuzzle?.explanation}</p>}
+          <div className="puzzle-actions">
+            <button onClick={() => setShowHint(true)}>Hint</button>
+            <button onClick={nextPuzzle}>Next puzzle</button>
+          </div>
+          <section className="panel-section">
+            <h3>Puzzle categories</h3>
+            <div className="category-grid">
+              {categories.map((category) => (
+                <button
+                  key={category}
+                  onClick={() => {
+                    const match = puzzles.find((puzzle) => puzzle.themes?.includes(category));
+                    if (match) {
+                      startPuzzle(match.id);
+                    }
+                  }}
+                >
+                  {category}
+                </button>
+              ))}
+            </div>
+          </section>
+          <section className="panel-section">
+            <h3>Puzzle list</h3>
+            <div className="puzzle-list">
+              {puzzles.map((puzzle) => (
+                <button
+                  className={currentPuzzle?.id === puzzle.id ? "active" : ""}
+                  key={puzzle.id}
+                  onClick={() => startPuzzle(puzzle.id)}
+                >
+                  {puzzle.title}
+                </button>
+              ))}
+            </div>
+          </section>
+        </aside>
+      </div>
+    </section>
   );
 }
 
 function AnalysisPage() {
   return (
-    <PlaceholderPage
-      title="Analysis"
-      items={["Upload PGN", "Analyze game", "Show mistakes and blunders"]}
-    />
+    <section className="page tool-layout">
+      <h1>Analysis</h1>
+      <div className="analysis-layout">
+        <article className="tool-panel">
+          <h3>Upload PGN</h3>
+          <textarea placeholder="Paste PGN here" />
+          <button className="primary-action">Analyze game</button>
+        </article>
+        <article className="tool-panel">
+          <h3>Mistakes / blunders</h3>
+          <div className="analysis-list">
+            <p>No analysis yet.</p>
+          </div>
+        </article>
+      </div>
+    </section>
   );
 }
 
-function ProfilePage() {
+function ProfilePage({ user, localStats, token, onLogin, onLogout, onUser, onRefresh }) {
+  const localProfile = localStats?.profile;
+  const identity = user || localProfile || { username: "Player" };
+  const [form, setForm] = useState({
+    username: identity.username || "",
+    display_name: identity.display_name || "",
+    favorite_theme: identity.favorite_theme || "Royal cosmic"
+  });
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    setForm({
+      username: identity.username || "",
+      display_name: identity.display_name || "",
+      favorite_theme: identity.favorite_theme || "Royal cosmic"
+    });
+  }, [user, localProfile]);
+
+  function update(key, value) {
+    setForm((current) => ({ ...current, [key]: value }));
+  }
+
+  async function save(event) {
+    event.preventDefault();
+    setMessage("");
+    try {
+      if (user) {
+        const data = await apiFetch("/api/auth/profile", {
+          method: "PATCH",
+          headers: { Authorization: `Bearer ${token}` },
+          body: JSON.stringify(form)
+        });
+        onUser(data.user);
+      } else {
+        await apiFetch("/api/local/profile", {
+          method: "PUT",
+          body: JSON.stringify({ username: form.username })
+        });
+      }
+      onRefresh();
+      setMessage("Saved.");
+    } catch (err) {
+      setMessage(err.message);
+    }
+  }
+
   return (
-    <PlaceholderPage
-      title="Profile"
-      items={["Username", "Rating", "Game history", "Puzzle stats", "Favorite memes/theme"]}
-    />
+    <section className="page profile-layout">
+      <h1>Profile</h1>
+      <div className="profile-grid">
+        <form className="profile-card profile-form" onSubmit={save}>
+          <h3>Account</h3>
+          <label>
+            Username
+            <input value={form.username} onChange={(event) => update("username", event.target.value)} />
+          </label>
+          {user && <>
+            <label>
+              Display name
+              <input value={form.display_name} onChange={(event) => update("display_name", event.target.value)} />
+            </label>
+            <label>
+              Favorite memes/theme
+              <input value={form.favorite_theme} onChange={(event) => update("favorite_theme", event.target.value)} />
+            </label>
+          </>}
+          {message && <p className="form-message">{message}</p>}
+          <div className="profile-actions">
+            <button className="primary-action" type="submit">Save profile</button>
+            {user ? <button className="secondary-action" type="button" onClick={onLogout}>Logout</button> : <button className="secondary-action" type="button" onClick={onLogin}>Login</button>}
+          </div>
+        </form>
+        <div className="profile-card">
+          <h3>{identity.display_name || identity.username}</h3>
+          <p>Username: {identity.username}</p>
+          <p>Games played: {localStats?.games_played ?? 0}</p>
+          <p>Wins: {localStats?.wins ?? 0} · Losses: {localStats?.losses ?? 0} · Draws: {localStats?.draws ?? 0}</p>
+          <p>Bot games: {localStats?.bot_games ?? 0} · Bot wins: {localStats?.bot_wins ?? 0}</p>
+          <p>Puzzle attempts: {localStats?.puzzle_attempts ?? 0}</p>
+          <p>Puzzles solved: {localStats?.puzzles_solved ?? 0}</p>
+          <p>Puzzle accuracy: {Math.round((localStats?.puzzle_accuracy ?? 0) * 100)}%</p>
+          {user && <p>Favorite memes/theme: {user.favorite_theme || "not set"}</p>}
+        </div>
+      </div>
+      <div className="profile-card">
+        <h3>Recent games</h3>
+        {(localStats?.recent_games || []).length ? localStats.recent_games.map((game) => (
+          <p key={game.id}>{game.mode}: {game.white_name} vs {game.black_name} · {game.result}</p>
+        )) : <p>No completed local games yet.</p>}
+      </div>
+    </section>
   );
 }
 
 function LeaderboardPage() {
-  return (
-    <PlaceholderPage
-      title="Leaderboard"
-      items={["Rapid rating", "Blitz rating", "Bullet rating", "Puzzle rating", "Meme mode ranking"]}
-    />
-  );
-}
+  const [entries, setEntries] = useState([]);
 
-function PlaceholderPage({ title, items }) {
+  useEffect(() => {
+    apiFetch("/api/local/leaderboard").then(setEntries).catch(() => setEntries([]));
+  }, []);
+
   return (
-    <section className="page placeholder-layout">
-      <h1>{title}</h1>
-      <div className="placeholder-grid">
-        {items.map((item) => (
-          <article className="feature-card" key={item}>
-            <h3>{item}</h3>
-            <p>idk</p>
+    <section className="page tool-layout">
+      <h1>Leaderboard</h1>
+      <div className="leaderboard-grid">
+        {entries.length ? entries.map((entry) => (
+          <article className="tool-panel" key={entry.category}>
+            <h3>{entry.category}</h3>
+            <ol className="leaderboard-list">
+              <li><span>{entry.username}</span><strong>{entry.score}</strong></li>
+            </ol>
           </article>
-        ))}
+        )) : <article className="tool-panel"><p>No local results yet.</p></article>}
       </div>
     </section>
   );

@@ -1,0 +1,12 @@
+python-chess==1.999
+numpy>=1.26
+pyarrow>=16.0
+zstandard>=0.22
+PyYAML>=6.0
+tqdm>=4.66
+scikit-learn>=1.4
+matplotlib>=3.8
+pytest>=8.0
+
+# Install PyTorch separately from https://pytorch.org/get-started/locally/
+# so you can choose CPU or the CUDA build that matches your computer.

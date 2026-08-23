@@ -1,10 +1,20 @@
+import base64
+import hashlib
+import hmac
+import json
+import os
+import secrets
+import time
 from typing import Any, Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+import chess
+from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from .database import get_connection, init_db, row_to_dict
+from .puzzle_validation import validate_puzzle
+from .stockfish_bot import StockfishBot
 
 
 app = FastAPI(title="Chess V2 API")
@@ -14,11 +24,80 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+TOKEN_SECRET = os.getenv("CHESS_V2_SECRET", "dev-only-change-me")
+TOKEN_TTL_SECONDS = 60 * 60 * 24 * 14
+STOCKFISH_PATH = os.getenv(
+    "STOCKFISH_PATH",
+    r"C:\Users\charl\Downloads\stockfish-windows-x86-64-avx2\stockfish\stockfish-windows-x86-64-avx2.exe",
+)
+stockfish_instance: Optional[StockfishBot] = None
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode().rstrip("=")
+
+
+def _unb64url(data: str) -> bytes:
+    padding = "=" * (-len(data) % 4)
+    return base64.urlsafe_b64decode(data + padding)
+
+
+def _hash_password(password: str, salt: Optional[str] = None) -> str:
+    salt = salt or secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 120000)
+    return f"{salt}${digest.hex()}"
+
+
+def _verify_password(password: str, stored: str) -> bool:
+    if not stored or "$" not in stored:
+        return False
+    salt, expected = stored.split("$", 1)
+    return hmac.compare_digest(_hash_password(password, salt), stored)
+
+
+def _make_token(user_id: int) -> str:
+    payload = {"sub": user_id, "exp": int(time.time()) + TOKEN_TTL_SECONDS}
+    body = _b64url(json.dumps(payload, separators=(",", ":")).encode())
+    sig = hmac.new(TOKEN_SECRET.encode(), body.encode(), hashlib.sha256).digest()
+    return f"{body}.{_b64url(sig)}"
+
+
+def _read_token(token: str) -> int:
+    try:
+        body, sig = token.split(".", 1)
+        expected = _b64url(hmac.new(TOKEN_SECRET.encode(), body.encode(), hashlib.sha256).digest())
+        if not hmac.compare_digest(sig, expected):
+            raise ValueError("bad signature")
+        payload = json.loads(_unb64url(body))
+        if payload["exp"] < time.time():
+            raise ValueError("expired")
+        return int(payload["sub"])
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Invalid token") from exc
+
+
+def _user_public(row):
+    user = row_to_dict(row)
+    if not user:
+        return None
+    user.pop("password_hash", None)
+    user.pop("avatar", None)
+    user.pop("bio", None)
+    return user
+
+
+def _auth_user(authorization: Optional[str]) -> int:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+    return _read_token(authorization.split(" ", 1)[1])
 
 
 class GameCreate(BaseModel):
@@ -35,6 +114,72 @@ class MoveCreate(BaseModel):
     move_uci: str
     fen_after: Optional[str] = None
     time_left: Optional[int] = None
+
+
+class RegisterCreate(BaseModel):
+    username: str
+    email: str
+    password: str
+    display_name: Optional[str] = None
+    favorite_theme: Optional[str] = None
+
+
+class LoginCreate(BaseModel):
+    login: str
+    password: str
+
+
+class GoogleLoginCreate(BaseModel):
+    credential: str
+    username: Optional[str] = None
+
+
+class ProfileUpdate(BaseModel):
+    username: Optional[str] = None
+    display_name: Optional[str] = None
+    favorite_theme: Optional[str] = None
+
+
+class StockfishMoveCreate(BaseModel):
+    fen: str
+    skill_level: int = 5
+    move_time: float = 0.5
+
+
+class PuzzleValidationCreate(BaseModel):
+    fen: str
+    moves_uci: list[str]
+
+
+class LocalProfileUpdate(BaseModel):
+    username: str
+
+
+class LocalGameCreate(BaseModel):
+    white_name: str = "Player"
+    black_name: str = "Player"
+    mode: str = "local"
+
+
+class LocalMoveCreate(BaseModel):
+    ply: int
+    uci: str
+    san: str
+    fen_after: str
+    time_left: Optional[int] = None
+
+
+class LocalGameFinish(BaseModel):
+    result: str
+    pgn: Optional[str] = None
+    final_fen: Optional[str] = None
+
+
+class LocalPuzzleAttemptCreate(BaseModel):
+    puzzle_id: str
+    correct: bool
+    attempts: int = 1
+    time_taken: Optional[int] = None
 
 
 class ConnectionManager:
@@ -66,9 +211,366 @@ def on_startup():
     init_db()
 
 
+@app.on_event("shutdown")
+def on_shutdown():
+    global stockfish_instance
+    if stockfish_instance is not None:
+        stockfish_instance.close()
+        stockfish_instance = None
+
+
+def get_stockfish(skill_level: int = 5) -> StockfishBot:
+    global stockfish_instance
+    if stockfish_instance is None:
+        try:
+            stockfish_instance = StockfishBot(STOCKFISH_PATH, skill_level=skill_level)
+        except (FileNotFoundError, OSError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Stockfish is unavailable. Set STOCKFISH_PATH. {exc}",
+            ) from exc
+    elif stockfish_instance.skill_level != skill_level:
+        stockfish_instance.set_skill_level(skill_level)
+    return stockfish_instance
+
+
 @app.get("/health")
 def health():
     return {"ok": True, "service": "chess-v2-api"}
+
+
+@app.post("/api/bot/stockfish/move")
+def stockfish_move(payload: StockfishMoveCreate):
+    try:
+        board = chess.Board(payload.fen)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid FEN: {exc}") from exc
+
+    if not 0 <= payload.skill_level <= 20:
+        raise HTTPException(status_code=400, detail="skill_level must be between 0 and 20")
+    if not 0.01 <= payload.move_time <= 30:
+        raise HTTPException(status_code=400, detail="move_time must be between 0.01 and 30 seconds")
+
+    bot = get_stockfish(payload.skill_level)
+    started = time.perf_counter()
+    try:
+        move = bot.choose_move(board, move_time=payload.move_time)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "move": move.uci(),
+        "san": board.san(move),
+        "fen_after": _fen_after(board, move),
+        "thinking_time_ms": round((time.perf_counter() - started) * 1000),
+    }
+
+
+def _fen_after(board: chess.Board, move: chess.Move) -> str:
+    next_board = board.copy(stack=False)
+    next_board.push(move)
+    return next_board.fen()
+
+
+@app.post("/api/puzzles/validate")
+def validate_puzzle_route(payload: PuzzleValidationCreate):
+    valid, message = validate_puzzle(payload.fen, payload.moves_uci)
+    return {"valid": valid, "message": message}
+
+
+@app.get("/api/local/profile")
+def get_local_profile():
+    with get_connection() as conn:
+        row = conn.execute("SELECT * FROM local_profile WHERE id = 1").fetchone()
+    return row_to_dict(row)
+
+
+@app.put("/api/local/profile")
+def update_local_profile(payload: LocalProfileUpdate):
+    username = payload.username.strip()
+    if not username or len(username) > 24:
+        raise HTTPException(status_code=400, detail="Username must be 1-24 characters")
+    with get_connection() as conn:
+        conn.execute("UPDATE local_profile SET username = ? WHERE id = 1", (username,))
+        conn.commit()
+        row = conn.execute("SELECT * FROM local_profile WHERE id = 1").fetchone()
+    return row_to_dict(row)
+
+
+@app.post("/api/local/games")
+def create_local_game(payload: LocalGameCreate):
+    with get_connection() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO local_games (white_name, black_name, mode)
+            VALUES (?, ?, ?)
+            """,
+            (payload.white_name.strip() or "Player", payload.black_name.strip() or "Opponent", payload.mode),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM local_games WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return row_to_dict(row)
+
+
+@app.post("/api/local/games/{game_id}/moves")
+def save_local_move(game_id: int, payload: LocalMoveCreate):
+    with get_connection() as conn:
+        game = conn.execute("SELECT id FROM local_games WHERE id = ?", (game_id,)).fetchone()
+        if game is None:
+            raise HTTPException(status_code=404, detail="Local game not found")
+        board = chess.Board()
+        previous_moves = conn.execute(
+            "SELECT uci FROM local_moves WHERE game_id = ? ORDER BY ply, id",
+            (game_id,),
+        ).fetchall()
+        try:
+            for previous in previous_moves:
+                board.push_uci(previous["uci"])
+            move = chess.Move.from_uci(payload.uci)
+            if move not in board.legal_moves:
+                raise ValueError("illegal move")
+            expected_san = board.san(move)
+            board.push(move)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Move rejected by python-chess: {exc}") from exc
+        if expected_san != payload.san:
+            raise HTTPException(status_code=400, detail="SAN does not match the validated move")
+        cur = conn.execute(
+            """
+            INSERT INTO local_moves (game_id, ply, uci, san, fen_after, time_left)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (game_id, payload.ply, payload.uci, expected_san, board.fen(), payload.time_left),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM local_moves WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return row_to_dict(row)
+
+
+@app.delete("/api/local/games/{game_id}/moves/last")
+def delete_last_local_move(game_id: int):
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT id FROM local_moves WHERE game_id = ? ORDER BY ply DESC, id DESC LIMIT 1",
+            (game_id,),
+        ).fetchone()
+        if row is None:
+            return {"deleted": False}
+        conn.execute("DELETE FROM local_moves WHERE id = ?", (row["id"],))
+        conn.execute("UPDATE local_games SET result = '*', ended_at = NULL WHERE id = ?", (game_id,))
+        conn.commit()
+    return {"deleted": True}
+
+
+@app.post("/api/local/games/{game_id}/finish")
+def finish_local_game(game_id: int, payload: LocalGameFinish):
+    if payload.result not in {"1-0", "0-1", "1/2-1/2", "*"}:
+        raise HTTPException(status_code=400, detail="Invalid game result")
+    with get_connection() as conn:
+        cur = conn.execute(
+            """
+            UPDATE local_games
+            SET result = ?, pgn = ?, final_fen = ?, ended_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (payload.result, payload.pgn, payload.final_fen, game_id),
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Local game not found")
+        conn.commit()
+        row = conn.execute("SELECT * FROM local_games WHERE id = ?", (game_id,)).fetchone()
+    return row_to_dict(row)
+
+
+@app.post("/api/local/puzzle-attempts")
+def save_local_puzzle_attempt(payload: LocalPuzzleAttemptCreate):
+    with get_connection() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO local_puzzle_attempts (puzzle_id, correct, attempts, time_taken)
+            VALUES (?, ?, ?, ?)
+            """,
+            (payload.puzzle_id, int(payload.correct), max(1, payload.attempts), payload.time_taken),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM local_puzzle_attempts WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return row_to_dict(row)
+
+
+def _local_stats():
+    with get_connection() as conn:
+        profile = conn.execute("SELECT * FROM local_profile WHERE id = 1").fetchone()
+        games = conn.execute("SELECT * FROM local_games ORDER BY created_at DESC, id DESC").fetchall()
+        attempts = conn.execute("SELECT * FROM local_puzzle_attempts").fetchall()
+    username = profile["username"]
+    wins = losses = draws = 0
+    bot_games = 0
+    bot_wins = 0
+    for game in games:
+        is_white = game["white_name"] == username
+        is_black = game["black_name"] == username
+        if game["mode"] == "bot":
+            bot_games += 1
+        if game["result"] == "1/2-1/2":
+            draws += 1
+        elif (is_white and game["result"] == "1-0") or (is_black and game["result"] == "0-1"):
+            wins += 1
+            if game["mode"] == "bot":
+                bot_wins += 1
+        elif (is_white and game["result"] == "0-1") or (is_black and game["result"] == "1-0"):
+            losses += 1
+    solved = sum(1 for attempt in attempts if attempt["correct"])
+    return {
+        "profile": row_to_dict(profile),
+        "games_played": len(games),
+        "wins": wins,
+        "losses": losses,
+        "draws": draws,
+        "bot_games": bot_games,
+        "bot_wins": bot_wins,
+        "puzzle_attempts": len(attempts),
+        "puzzles_solved": solved,
+        "puzzle_accuracy": round(solved / len(attempts), 3) if attempts else 0,
+        "recent_games": [row_to_dict(game) for game in games[:10]],
+        "recent_puzzles": [row_to_dict(attempt) for attempt in attempts[-10:]],
+    }
+
+
+@app.get("/api/local/stats")
+def local_stats():
+    return _local_stats()
+
+
+@app.get("/api/local/leaderboard")
+def local_leaderboard():
+    stats = _local_stats()
+    username = stats["profile"]["username"]
+    return [
+        {"category": "Most games played", "username": username, "score": stats["games_played"]},
+        {"category": "Most puzzle solves", "username": username, "score": stats["puzzles_solved"]},
+        {"category": "Best puzzle accuracy", "username": username, "score": stats["puzzle_accuracy"]},
+        {"category": "Bot win count", "username": username, "score": stats["bot_wins"]},
+    ]
+
+
+@app.post("/api/auth/register")
+def register(payload: RegisterCreate):
+    if len(payload.password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    with get_connection() as conn:
+        try:
+            cur = conn.execute(
+                """
+                INSERT INTO users
+                    (username, email, password_hash, display_name, favorite_theme)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    payload.username.strip(),
+                    payload.email.strip().lower(),
+                    _hash_password(payload.password),
+                    payload.display_name,
+                    payload.favorite_theme,
+                ),
+            )
+            user_id = cur.lastrowid
+            for mode in ("rapid", "blitz", "bullet", "puzzle", "meme"):
+                conn.execute("INSERT INTO ratings (user_id, mode) VALUES (?, ?)", (user_id, mode))
+            conn.commit()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Username or email already exists") from exc
+        row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    return {"token": _make_token(user_id), "user": _user_public(row)}
+
+
+@app.post("/api/auth/login")
+def login(payload: LoginCreate):
+    login_value = payload.login.strip().lower()
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM users WHERE lower(username) = ? OR lower(email) = ?",
+            (login_value, login_value),
+        ).fetchone()
+    if not row or not _verify_password(payload.password, row["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid username/email or password")
+    return {"token": _make_token(row["id"]), "user": _user_public(row)}
+
+
+@app.post("/api/auth/google")
+def google_login(payload: GoogleLoginCreate):
+    client_id = os.getenv("GOOGLE_CLIENT_ID")
+    if not client_id:
+        raise HTTPException(status_code=400, detail="GOOGLE_CLIENT_ID is not configured")
+    try:
+        from google.auth.transport import requests
+        from google.oauth2 import id_token
+
+        info = id_token.verify_oauth2_token(
+            payload.credential,
+            requests.Request(),
+            client_id,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Invalid Google credential") from exc
+
+    google_sub = info["sub"]
+    email = info.get("email", "").lower()
+    display_name = info.get("name") or payload.username or email.split("@")[0]
+    username = payload.username or email.split("@")[0]
+
+    with get_connection() as conn:
+        row = conn.execute("SELECT * FROM users WHERE google_sub = ?", (google_sub,)).fetchone()
+        if row is None:
+            base_username = username
+            suffix = 1
+            while conn.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone():
+                suffix += 1
+                username = f"{base_username}{suffix}"
+            cur = conn.execute(
+                """
+                INSERT INTO users
+                    (username, email, password_hash, display_name, google_sub)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (username, email, "google", display_name, google_sub),
+            )
+            user_id = cur.lastrowid
+            for mode in ("rapid", "blitz", "bullet", "puzzle", "meme"):
+                conn.execute("INSERT INTO ratings (user_id, mode) VALUES (?, ?)", (user_id, mode))
+            conn.commit()
+            row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    return {"token": _make_token(row["id"]), "user": _user_public(row)}
+
+
+@app.get("/api/auth/me")
+def me(authorization: Optional[str] = Header(default=None)):
+    user_id = _auth_user(authorization)
+    with get_connection() as conn:
+        row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"user": _user_public(row)}
+
+
+@app.patch("/api/auth/profile")
+def update_profile(payload: ProfileUpdate, authorization: Optional[str] = Header(default=None)):
+    user_id = _auth_user(authorization)
+    fields = payload.dict(exclude_unset=True)
+    allowed = ["username", "display_name", "favorite_theme"]
+    updates = [(key, fields[key]) for key in allowed if key in fields]
+    if not updates:
+        raise HTTPException(status_code=400, detail="No profile fields to update")
+
+    assignments = ", ".join(f"{key} = ?" for key, _ in updates)
+    values = [value for _, value in updates]
+    values.append(user_id)
+    with get_connection() as conn:
+        try:
+            conn.execute(f"UPDATE users SET {assignments} WHERE id = ?", values)
+            conn.commit()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Username already exists") from exc
+        row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    return {"user": _user_public(row)}
 
 
 @app.post("/api/games")
