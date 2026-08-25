@@ -32,7 +32,13 @@ export function get_legal_moves(board, turn) {
 }
 
 export function make_move(board, move) {
-  return asGame(board).move(move);
+  try {
+    return asGame(board).move(move);
+  } catch {
+    // Illegal destinations are normal during piece selection. Let the UI
+    // switch to another friendly piece instead of treating them as errors.
+    return null;
+  }
 }
 
 export function make_move_copy(board, move) {

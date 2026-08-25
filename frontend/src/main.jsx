@@ -422,6 +422,10 @@ function PlayPage({ botConfig }) {
       setPremove(null);
       return;
     }
+    if (piece && piece.color === humanColor) {
+      selectSquareForColor(square, humanColor);
+      return;
+    }
     setPremove({ from: selected, to: square });
     setSelected(null);
     setLegalTargets([]);
@@ -482,7 +486,7 @@ function PlayPage({ botConfig }) {
       }
       try {
         const chosenMove = await Promise.resolve(
-          botConfig.choose_move(gameRef.current, legalMoves, botConfig.color)
+          botConfig.bot.choose_move(gameRef.current, legalMoves, botConfig.color)
         );
         if (cancelled || !chosenMove || gameRef.current.isGameOver()) {
           return;
@@ -874,7 +878,7 @@ function BotBattlePage({ onStart }) {
           <button
             className="primary-action"
             onClick={() => onStart({
-              ...selectedBot.create(level, personality),
+              bot: selectedBot.create(level, personality),
               label: selectedBot.label,
               key: botKey,
               level,

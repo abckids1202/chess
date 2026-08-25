@@ -6,3 +6,5 @@ dist/
 .env
 backend/data/
 *.log
+data/raw/lichess_db_puzzle.csv
+data/raw/lichess_db_puzzle.csv.zst
