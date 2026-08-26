@@ -1086,24 +1086,191 @@ function PuzzlePage() {
 }
 
 function AnalysisPage() {
+  const [pgn, setPgn] = useState("");
+  const [skillLevel, setSkillLevel] = useState(5);
+  const [analysis, setAnalysis] = useState(null);
+  const [selectedPly, setSelectedPly] = useState(null);
+  const [memeMode, setMemeMode] = useState(false);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [error, setError] = useState("");
+
+  async function analyzeGame(event) {
+    event.preventDefault();
+    setError("");
+    setAnalysis(null);
+    setAnalyzing(true);
+    try {
+      const result = await apiFetch("/api/analysis", {
+        method: "POST",
+        body: JSON.stringify({ pgn, skill_level: Number(skillLevel), analysis_time: 0.25, max_plies: 120 })
+      });
+      setAnalysis(result);
+      setSelectedPly(result.moves.length ? result.moves[result.moves.length - 1].ply : null);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setAnalyzing(false);
+    }
+  }
+
+  const currentMove = analysis?.moves.find((move) => move.ply === selectedPly)
+    || analysis?.summary?.turning_point
+    || analysis?.moves?.[analysis.moves.length - 1];
+  const previewBoard = currentMove ? new Chess(currentMove.fen_before).board() : null;
+
   return (
-    <section className="page tool-layout">
+    <section className="page tool-layout analysis-page">
       <h1>Analysis</h1>
-      <div className="analysis-layout">
-        <article className="tool-panel">
-          <h3>Upload PGN</h3>
-          <textarea placeholder="Paste PGN here" />
-          <button className="primary-action">Analyze game</button>
-        </article>
-        <article className="tool-panel">
-          <h3>Mistakes / blunders</h3>
-          <div className="analysis-list">
-            <p>No analysis yet.</p>
+      <form className="tool-panel analysis-input" onSubmit={analyzeGame}>
+        <div className="analysis-input-heading">
+          <div>
+            <h3>Paste a game for autopsy</h3>
+            <p>Chess V2 compares every move against a local Stockfish line.</p>
           </div>
+          <label>
+            Engine strength
+            <select value={skillLevel} onChange={(event) => setSkillLevel(event.target.value)}>
+              <option value="1">Easy</option>
+              <option value="5">Normal</option>
+              <option value="10">Hard</option>
+              <option value="20">Boss</option>
+            </select>
+          </label>
+        </div>
+        <textarea value={pgn} onChange={(event) => setPgn(event.target.value)} placeholder="Paste PGN here" />
+        <div className="analysis-input-actions">
+          <button className="primary-action" type="submit" disabled={analyzing}>{analyzing ? "Analyzing..." : "Analyze game"}</button>
+          <button type="button" onClick={() => { setPgn(""); setAnalysis(null); setError(""); }}>Clear PGN</button>
+          {analyzing && <span className="analysis-progress">Stockfish is reading the position...</span>}
+        </div>
+        {error && <p className="form-error">{error}</p>}
+      </form>
+
+      {!analysis && !analyzing && !error && (
+        <article className="tool-panel analysis-empty">
+          <h3>Awaiting a game</h3>
+          <p>Paste a real PGN above to generate the post-game report.</p>
         </article>
-      </div>
+      )}
+
+      {analysis && (
+        <div className="analysis-report">
+          {analysis.truncated && <p className="analysis-notice">This report analyzes the first 120 plies.</p>}
+          <article className="analysis-verdict">
+            <div>
+              <span className="analysis-eyebrow">Match verdict</span>
+              <h2>{analysis.summary.verdict}</h2>
+              <p>{analysis.game_info.white} vs {analysis.game_info.black} · {analysis.game_info.result || "unfinished"}</p>
+            </div>
+            <div className="analysis-result-mark">{analysis.game_info.result || "*"}</div>
+          </article>
+
+          <div className="analysis-stat-grid">
+            <AnalysisStat label="White accuracy" value={`${analysis.summary.accuracy_white}%`} />
+            <AnalysisStat label="Black accuracy" value={`${analysis.summary.accuracy_black}%`} />
+            <AnalysisStat label="Blunders" value={analysis.summary.white_blunders + analysis.summary.black_blunders} />
+            <AnalysisStat label="Mistakes" value={analysis.summary.white_mistakes + analysis.summary.black_mistakes} />
+            <AnalysisStat label="Chaos meter" value={`${analysis.summary.chaos_meter}%`} />
+            <AnalysisStat label="Game length" value={`${analysis.summary.total_moves} ply`} />
+          </div>
+
+          <article className="tool-panel analysis-pulse">
+            <div className="analysis-section-heading">
+              <div><span className="analysis-eyebrow">Where the game moved</span><h3>Game pulse</h3></div>
+              <span className="analysis-help">Positive is better for White</span>
+            </div>
+            <div className="pulse-track">
+              {analysis.evaluation_timeline.map((point) => (
+                <button
+                  key={point.ply}
+                  type="button"
+                  className={`pulse-point pulse-${point.classification}`}
+                  title={`Ply ${point.ply}: ${point.display}`}
+                  onClick={() => setSelectedPly(point.ply)}
+                  style={{ height: `${Math.max(12, Math.min(100, 25 + Math.abs(point.eval_after) * 13))}%` }}
+                />
+              ))}
+            </div>
+            <div className="pulse-axis"><span>Opening</span><span>Middlegame</span><span>Endgame</span></div>
+          </article>
+
+          <div className="analysis-two-column">
+            <article className="tool-panel">
+              <div className="analysis-section-heading"><h3>Critical moments</h3><span>{analysis.critical_moments.length}</span></div>
+              {analysis.critical_moments.length ? analysis.critical_moments.map((move, index) => (
+                <button className="critical-row" type="button" key={move.ply} onClick={() => setSelectedPly(move.ply)}>
+                  <strong>#{index + 1} · {move.color} {move.move_number}</strong>
+                  <span>{move.played_move_san} → {move.best_move_san}</span>
+                  <small>{move.classification} · loss {move.eval_loss.toFixed(2)}</small>
+                </button>
+              )) : <p>No critical moments crossed the report threshold.</p>}
+            </article>
+
+            <article className="tool-panel analysis-preview">
+              <div className="analysis-section-heading"><h3>Position preview</h3><span>{currentMove ? `Ply ${currentMove.ply}` : "-"}</span></div>
+              {previewBoard && <ChessBoard board={previewBoard} selected={null} premove={null} legalTargets={new Set()} onSquare={() => {}} />}
+              {currentMove && <div className="position-details"><strong>{currentMove.played_move_san} <span>vs</span> {currentMove.best_move_san}</strong><p>{currentMove.commentary}</p><small>{currentMove.eval_before_display} → {currentMove.eval_after_display}</small></div>}
+            </article>
+          </div>
+
+          <div className="analysis-two-column">
+            <AnalysisMoveCard title="Best move" move={analysis.summary.best_move} />
+            <AnalysisMoveCard title="Worst move" move={analysis.summary.worst_move} danger />
+          </div>
+
+          <article className="tool-panel blunder-reel">
+            <div className="analysis-section-heading">
+              <div><span className="analysis-eyebrow">The evidence locker</span><h3>Blunder reel</h3></div>
+              <button type="button" className="mode-toggle" onClick={() => setMemeMode((value) => !value)}>{memeMode ? "Meme mode" : "Serious mode"}</button>
+            </div>
+            {analysis.moves.filter((move) => ["mistake", "blunder", "critical"].includes(move.classification)).length ? (
+              analysis.moves.filter((move) => ["mistake", "blunder", "critical"].includes(move.classification)).map((move) => (
+                <div className={`reel-row reel-${move.classification}`} key={move.ply}>
+                  <strong>Move {move.move_number} {move.color}</strong>
+                  <span>{memeMode ? memeComment(move) : `${move.classification[0].toUpperCase() + move.classification.slice(1)}. ${move.commentary}`}</span>
+                </div>
+              ))
+            ) : <p>No mistakes or blunders were detected at the current engine setting.</p>}
+          </article>
+
+          <div className="analysis-two-column">
+            <article className="tool-panel">
+              <h3>Player diagnosis</h3>
+              <p className="diagnosis-text">{analysis.summary.player_diagnosis}</p>
+            </article>
+            <article className="tool-panel">
+              <h3>Practice prescription</h3>
+              <ul className="practice-list">
+                {analysis.summary.practice_recommendations.map((item) => <li key={item}>{item}</li>)}
+              </ul>
+            </article>
+          </div>
+        </div>
+      )}
     </section>
   );
+}
+
+function AnalysisStat({ label, value }) {
+  return <div className="analysis-stat"><strong>{value}</strong><span>{label}</span></div>;
+}
+
+function AnalysisMoveCard({ title, move, danger = false }) {
+  return (
+    <article className={`tool-panel move-card ${danger ? "move-card-danger" : ""}`}>
+      <span className="analysis-eyebrow">{title}</span>
+      <h3>{move?.played_move_san || "-"}</h3>
+      <p>Engine line: {move?.best_move_san || "-"}</p>
+      <small>{move?.commentary || "No move data."}</small>
+    </article>
+  );
+}
+
+function memeComment(move) {
+  if (move.classification === "critical") return "The position has entered witness protection.";
+  if (move.played_move_san.startsWith("Q")) return "The queen has filed a missing person report.";
+  if (move.eval_loss >= 3) return "Stockfish stared at this move in silence.";
+  return "You had one job.";
 }
 
 function ProfilePage({ localStats, onRefresh }) {

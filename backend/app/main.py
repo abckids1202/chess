@@ -9,10 +9,13 @@ from datetime import datetime
 from typing import Any, Optional
 
 import chess
+import chess.engine
 from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from .analysis.analysis_service import analyze_pgn
+from .analysis.stockfish_analyzer import StockfishAnalyzer
 from .database import get_connection, init_db, row_to_dict
 from .local_storage import (
     create_player,
@@ -158,6 +161,13 @@ class StockfishMoveCreate(BaseModel):
     move_time: float = 0.5
 
 
+class AnalysisCreate(BaseModel):
+    pgn: str
+    skill_level: int = 5
+    analysis_time: float = 0.25
+    max_plies: int = 120
+
+
 class PuzzleValidationCreate(BaseModel):
     fen: str
     moves_uci: list[str]
@@ -287,6 +297,35 @@ def stockfish_move(payload: StockfishMoveCreate):
         "fen_after": _fen_after(board, move),
         "thinking_time_ms": round((time.perf_counter() - started) * 1000),
     }
+
+
+@app.post("/api/analysis")
+def analyze_game(payload: AnalysisCreate):
+    if not payload.pgn.strip():
+        raise HTTPException(status_code=400, detail="Please paste a PGN before analyzing the game.")
+    if not 0 <= payload.skill_level <= 20:
+        raise HTTPException(status_code=400, detail="skill_level must be between 0 and 20")
+    if not 0.05 <= payload.analysis_time <= 5:
+        raise HTTPException(status_code=400, detail="analysis_time must be between 0.05 and 5 seconds")
+    if not 1 <= payload.max_plies <= 240:
+        raise HTTPException(status_code=400, detail="max_plies must be between 1 and 240")
+    try:
+        engine = get_stockfish(payload.skill_level)
+        analyzer = StockfishAnalyzer(
+            analysis_time=payload.analysis_time,
+            engine=engine,
+        )
+        return analyze_pgn(payload.pgn, analyzer, max_plies=payload.max_plies)
+    except HTTPException:
+        raise
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=f"Stockfish path is unavailable. {exc}") from exc
+    except chess.engine.EngineError as exc:
+        raise HTTPException(status_code=503, detail="Stockfish stopped while analyzing this game.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 def _fen_after(board: chess.Board, move: chess.Move) -> str:
