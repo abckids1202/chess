@@ -66,7 +66,7 @@ function App() {
   const [localStats, setLocalStats] = useState(null);
 
   function refreshLocalStats() {
-    apiFetch("/api/local/stats").then(setLocalStats).catch(() => {});
+    return apiFetch("/api/local/stats").then(setLocalStats).catch(() => null);
   }
 
   useEffect(() => {
@@ -117,28 +117,19 @@ function App() {
             </button>
           ))}
         </div>
-        {user ? (
-          <button className="login-button" onClick={() => setPage("Profile")}>
-            {user.display_name || user.username}
-          </button>
-        ) : (
-          <button className="login-button" onClick={() => setAuthOpen(true)}>Login</button>
-        )}
+        <button className="login-button" onClick={() => setPage("Profile")}>
+          {localStats?.profile?.username || "Profile"}
+        </button>
       </nav>
 
-      {page === "Home" && <HomePage onPlay={() => { setBotConfig(null); setPage("Play"); }} onLogin={() => setAuthOpen(true)} />}
+      {page === "Home" && <HomePage onPlay={() => { setBotConfig(null); setPage("Play"); }} onProfile={() => setPage("Profile")} />}
       {page === "Play" && <PlayPage botConfig={botConfig} />}
       {page === "Bot Battle" && <BotBattlePage onStart={(config) => { setBotConfig(config); setPage("Play"); }} />}
       {page === "Puzzle" && <PuzzlePage />}
       {page === "Analysis" && <AnalysisPage />}
       {page === "Profile" && (
         <ProfilePage
-          user={user}
           localStats={localStats}
-          token={token}
-          onLogin={() => setAuthOpen(true)}
-          onLogout={logout}
-          onUser={setUser}
           onRefresh={refreshLocalStats}
         />
       )}
@@ -165,7 +156,7 @@ function Starfield() {
   );
 }
 
-function HomePage({ onPlay, onLogin }) {
+function HomePage({ onPlay, onProfile }) {
   return (
     <section className="page home-layout">
       <div className="hero-copy">
@@ -176,7 +167,7 @@ function HomePage({ onPlay, onLogin }) {
         </p>
         <div className="hero-actions">
           <button className="primary-action" onClick={onPlay}>Play</button>
-          <button className="secondary-action" onClick={onLogin}>Login</button>
+          <button className="secondary-action" onClick={onProfile}>Local profile</button>
         </div>
       </div>
       <ThemePreview />
@@ -980,7 +971,9 @@ function PuzzlePage() {
         body: JSON.stringify({
           puzzle_id: currentPuzzle.id,
           correct: result.complete,
-          attempts: attemptNumber
+          attempts: attemptNumber,
+          puzzle_rating: currentPuzzle.rating || null,
+          themes: currentPuzzle.themes || []
         })
       }).catch(() => {});
     }
@@ -1113,97 +1106,186 @@ function AnalysisPage() {
   );
 }
 
-function ProfilePage({ user, localStats, token, onLogin, onLogout, onUser, onRefresh }) {
-  const localProfile = localStats?.profile;
-  const identity = user || localProfile || { username: "Player" };
-  const [form, setForm] = useState({
-    username: identity.username || "",
-    display_name: identity.display_name || "",
-    favorite_theme: identity.favorite_theme || "Royal cosmic"
-  });
+function ProfilePage({ localStats, onRefresh }) {
+  const identity = localStats?.profile || { id: 1, username: "Player" };
+  const [players, setPlayers] = useState([]);
+  const [username, setUsername] = useState(identity.username || "");
+  const [newUsername, setNewUsername] = useState("");
   const [message, setMessage] = useState("");
 
-  useEffect(() => {
-    setForm({
-      username: identity.username || "",
-      display_name: identity.display_name || "",
-      favorite_theme: identity.favorite_theme || "Royal cosmic"
-    });
-  }, [user, localProfile]);
-
-  function update(key, value) {
-    setForm((current) => ({ ...current, [key]: value }));
+  async function loadPlayers() {
+    try {
+      const data = await apiFetch("/api/local/players");
+      setPlayers(data.players || []);
+    } catch (error) {
+      setMessage(error.message);
+    }
   }
 
-  async function save(event) {
+  useEffect(() => {
+    setUsername(identity.username || "");
+  }, [identity.id, identity.username]);
+
+  useEffect(() => {
+    loadPlayers();
+  }, [identity.id]);
+
+  async function saveProfile(event) {
     event.preventDefault();
     setMessage("");
     try {
-      if (user) {
-        const data = await apiFetch("/api/auth/profile", {
-          method: "PATCH",
-          headers: { Authorization: `Bearer ${token}` },
-          body: JSON.stringify(form)
-        });
-        onUser(data.user);
-      } else {
-        await apiFetch("/api/local/profile", {
-          method: "PUT",
-          body: JSON.stringify({ username: form.username })
-        });
-      }
-      onRefresh();
-      setMessage("Saved.");
-    } catch (err) {
-      setMessage(err.message);
+      await apiFetch("/api/local/profile", {
+        method: "PUT",
+        body: JSON.stringify({ username })
+      });
+      await onRefresh();
+      await loadPlayers();
+      setMessage("Profile saved.");
+    } catch (error) {
+      setMessage(error.message);
     }
   }
+
+  async function createNewPlayer() {
+    setMessage("");
+    try {
+      if (!newUsername.trim()) {
+        throw new Error("Enter a username for the new player.");
+      }
+      await apiFetch("/api/local/players", {
+        method: "POST",
+        body: JSON.stringify({ username: newUsername })
+      });
+      setNewUsername("");
+      await onRefresh();
+      await loadPlayers();
+      setMessage("New player created and activated.");
+    } catch (error) {
+      setMessage(error.message);
+    }
+  }
+
+  async function switchPlayer(event) {
+    const playerId = Number(event.target.value);
+    if (!playerId || playerId === identity.id) {
+      return;
+    }
+    try {
+      await apiFetch(`/api/local/players/${playerId}/activate`, { method: "POST" });
+      await onRefresh();
+      await loadPlayers();
+      setMessage("Active player switched.");
+    } catch (error) {
+      setMessage(error.message);
+    }
+  }
+
+  const games = localStats?.recent_games || [];
+  const puzzles = localStats?.recent_puzzles || [];
+  const percent = Math.round((localStats?.puzzle_accuracy || 0) * 100);
 
   return (
     <section className="page profile-layout">
       <h1>Profile</h1>
+      <p className="profile-kicker">Local player memory · saved on this computer</p>
       <div className="profile-grid">
-        <form className="profile-card profile-form" onSubmit={save}>
-          <h3>Account</h3>
+        <form className="profile-card profile-form" onSubmit={saveProfile}>
+          <h3>Local profile</h3>
+          <p className="profile-muted">Active player: {identity.username}</p>
           <label>
             Username
-            <input value={form.username} onChange={(event) => update("username", event.target.value)} />
+            <input value={username} maxLength={24} onChange={(event) => setUsername(event.target.value)} />
           </label>
-          {user && <>
-            <label>
-              Display name
-              <input value={form.display_name} onChange={(event) => update("display_name", event.target.value)} />
-            </label>
-            <label>
-              Favorite memes/theme
-              <input value={form.favorite_theme} onChange={(event) => update("favorite_theme", event.target.value)} />
-            </label>
-          </>}
-          {message && <p className="form-message">{message}</p>}
           <div className="profile-actions">
             <button className="primary-action" type="submit">Save profile</button>
-            {user ? <button className="secondary-action" type="button" onClick={onLogout}>Logout</button> : <button className="secondary-action" type="button" onClick={onLogin}>Login</button>}
           </div>
+          <div className="profile-divider" />
+          <label>
+            New player
+            <input value={newUsername} maxLength={24} placeholder="Enter a username" onChange={(event) => setNewUsername(event.target.value)} />
+          </label>
+          <button className="secondary-action" type="button" onClick={createNewPlayer}>Create and switch</button>
+          <label>
+            Switch player
+            <select value={identity.id} onChange={switchPlayer}>
+              {players.map((player) => <option value={player.id} key={player.id}>{player.username}</option>)}
+            </select>
+          </label>
+          {message && <p className="form-message">{message}</p>}
         </form>
-        <div className="profile-card">
-          <h3>{identity.display_name || identity.username}</h3>
-          <p>Username: {identity.username}</p>
-          <p>Games played: {localStats?.games_played ?? 0}</p>
-          <p>Wins: {localStats?.wins ?? 0} · Losses: {localStats?.losses ?? 0} · Draws: {localStats?.draws ?? 0}</p>
-          <p>Bot games: {localStats?.bot_games ?? 0} · Bot wins: {localStats?.bot_wins ?? 0}</p>
-          <p>Puzzle attempts: {localStats?.puzzle_attempts ?? 0}</p>
-          <p>Puzzles solved: {localStats?.puzzles_solved ?? 0}</p>
-          <p>Puzzle accuracy: {Math.round((localStats?.puzzle_accuracy ?? 0) * 100)}%</p>
-          {user && <p>Favorite memes/theme: {user.favorite_theme || "not set"}</p>}
+
+        <div className="profile-card profile-summary-card">
+          <h3>{identity.username}</h3>
+          <p>Created: {identity.created_at || "Today"}</p>
+          <p>Last active: {identity.last_active_at || "Now"}</p>
+          <div className="profile-stat-grid">
+            <ProfileStat label="Games played" value={localStats?.games_played ?? 0} />
+            <ProfileStat label="Win rate" value={`${Math.round((localStats?.win_rate || 0) * 100)}%`} />
+            <ProfileStat label="Puzzle accuracy" value={`${percent}%`} />
+            <ProfileStat label="Solved" value={localStats?.puzzles_solved ?? 0} />
+          </div>
         </div>
       </div>
-      <div className="profile-card">
-        <h3>Recent games</h3>
-        {(localStats?.recent_games || []).length ? localStats.recent_games.map((game) => (
-          <p key={game.id}>{game.mode}: {game.white_name} vs {game.black_name} · {game.result}</p>
-        )) : <p>No completed local games yet.</p>}
+
+      <div className="profile-grid profile-detail-grid">
+        <div className="profile-card">
+          <h3>Game stats</h3>
+          <p>Games played: {localStats?.games_played ?? 0}</p>
+          <p>Wins: {localStats?.wins ?? 0}</p>
+          <p>Losses: {localStats?.losses ?? 0}</p>
+          <p>Draws: {localStats?.draws ?? 0}</p>
+          <p>Unfinished: {localStats?.unfinished_games ?? 0}</p>
+        </div>
+        <div className="profile-card">
+          <h3>Bot stats</h3>
+          <p>Bot games: {localStats?.bot_games ?? 0}</p>
+          <p>Bot wins: {localStats?.bot_wins ?? 0}</p>
+          <p>Bot losses: {localStats?.bot_losses ?? 0}</p>
+          <p>Bot draws: {localStats?.bot_draws ?? 0}</p>
+          <p>Best bot beaten: {localStats?.best_bot_beaten || "None yet"}</p>
+        </div>
+        <div className="profile-card">
+          <h3>Puzzle stats</h3>
+          <p>Attempts: {localStats?.puzzle_attempts ?? 0}</p>
+          <p>Solved: {localStats?.puzzles_solved ?? 0}</p>
+          <p>Accuracy: {percent}%</p>
+          <p>Average attempts: {localStats?.average_puzzle_attempts ?? 0}</p>
+          <p>Best rating solved: {localStats?.best_puzzle_rating_solved || "None yet"}</p>
+        </div>
+      </div>
+
+      <div className="profile-grid profile-detail-grid">
+        <div className="profile-card profile-activity-card">
+          <h3>Recent games</h3>
+          {games.length ? games.map((game) => (
+            <div className="activity-row" key={game.id}>
+              <strong className={`result-${game.player_result}`}>{game.player_result}</strong>
+              <span>vs {game.opponent_display || "Opponent"} · {game.total_moves || 0} moves</span>
+              <small>{game.result_reason || game.mode || "game"} · {game.date || "recently"}</small>
+            </div>
+          )) : <p>No completed games yet.</p>}
+        </div>
+        <div className="profile-card profile-activity-card">
+          <h3>Recent puzzle attempts</h3>
+          {puzzles.length ? puzzles.map((attempt) => (
+            <div className="activity-row" key={attempt.id}>
+              <strong className={attempt.solved ? "result-win" : "result-loss"}>{attempt.solved ? "Solved" : "Failed"}</strong>
+              <span>{attempt.puzzle_id} · {attempt.attempts} attempt{attempt.attempts === 1 ? "" : "s"}</span>
+              <small>{attempt.puzzle_rating || "Unrated"} · {(attempt.themes || []).join(", ") || "untagged"}</small>
+            </div>
+          )) : <p>No puzzle attempts yet.</p>}
+        </div>
       </div>
     </section>
+  );
+}
+
+function ProfileStat({ label, value }) {
+  return (
+    <div className="profile-stat">
+      <strong>{value}</strong>
+      <span>{label}</span>
+    </div>
   );
 }
 
@@ -1221,9 +1303,16 @@ function LeaderboardPage() {
         {entries.length ? entries.map((entry) => (
           <article className="tool-panel" key={entry.category}>
             <h3>{entry.category}</h3>
-            <ol className="leaderboard-list">
-              <li><span>{entry.username}</span><strong>{entry.score}</strong></li>
-            </ol>
+            {entry.entries?.length ? (
+              <ol className="leaderboard-list">
+                {entry.entries.map((player) => (
+                  <li key={player.player_id}>
+                    <span>{player.username}</span>
+                    <strong>{player.score}{entry.category.includes("accuracy") ? "%" : ""}</strong>
+                  </li>
+                ))}
+              </ol>
+            ) : <p>No local results yet.</p>}
           </article>
         )) : <article className="tool-panel"><p>No local results yet.</p></article>}
       </div>

@@ -732,6 +732,16 @@ button {
   min-height: 70vh;
 }
 
+.profile-kicker,
+.profile-muted {
+  color: var(--dim);
+}
+
+.profile-detail-grid {
+  grid-template-columns: repeat(3, 1fr);
+  margin-top: 20px;
+}
+
 .profile-grid {
   display: grid;
   grid-template-columns: minmax(320px, 520px) 1fr;
@@ -749,6 +759,80 @@ button {
 
 .profile-card p {
   color: var(--dim);
+}
+
+.profile-form select {
+  width: 100%;
+  border: 1px solid rgba(110, 80, 200, 0.75);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: rgba(12, 10, 30, 0.82);
+  color: var(--cream);
+}
+
+.profile-divider {
+  height: 1px;
+  margin: 4px 0;
+  background: rgba(110, 80, 200, 0.55);
+}
+
+.profile-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.profile-stat {
+  display: grid;
+  gap: 5px;
+  padding: 12px;
+  border: 1px solid rgba(110, 80, 200, 0.5);
+  border-radius: 8px;
+  background: rgba(12, 10, 30, 0.35);
+}
+
+.profile-stat strong {
+  color: var(--gold);
+  font-size: 24px;
+}
+
+.profile-stat span {
+  color: var(--dim);
+  font-size: 12px;
+}
+
+.profile-activity-card {
+  min-height: 190px;
+}
+
+.activity-row {
+  display: grid;
+  gap: 4px;
+  padding: 10px 0;
+  border-top: 1px solid rgba(110, 80, 200, 0.35);
+}
+
+.activity-row span,
+.activity-row small {
+  color: var(--dim);
+}
+
+.activity-row small {
+  font-size: 12px;
+}
+
+.result-win {
+  color: var(--good, #78e6a0);
+}
+
+.result-loss {
+  color: var(--danger);
+}
+
+.result-draw,
+.result-unfinished {
+  color: var(--gold);
 }
 
 .profile-avatar {
@@ -780,6 +864,10 @@ button {
   .profile-grid {
     grid-template-columns: 1fr 1fr;
   }
+
+  .profile-detail-grid {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 
 @media (max-width: 560px) {
@@ -796,6 +884,10 @@ button {
   .profile-grid,
   .action-row {
     grid-template-columns: 1fr;
+  }
+
+  .profile-stat-grid {
+    grid-template-columns: repeat(2, 1fr);
   }
 
   .wide-panel {

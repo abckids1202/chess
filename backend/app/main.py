@@ -5,6 +5,7 @@ import json
 import os
 import secrets
 import time
+from datetime import datetime
 from typing import Any, Optional
 
 import chess
@@ -13,6 +14,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from .database import get_connection, init_db, row_to_dict
+from .local_storage import (
+    create_player,
+    get_active_player,
+    get_all_players,
+    get_local_leaderboard,
+    get_all_settings,
+    get_player_stats,
+    set_setting,
+    set_active_player,
+    update_player,
+)
 from .puzzle_validation import validate_puzzle
 from .stockfish_bot import StockfishBot
 
@@ -155,6 +167,15 @@ class LocalProfileUpdate(BaseModel):
     username: str
 
 
+class LocalPlayerCreate(BaseModel):
+    username: str
+
+
+class LocalSettingUpdate(BaseModel):
+    key: str
+    value: Any
+
+
 class LocalGameCreate(BaseModel):
     white_name: str = "Player"
     black_name: str = "Player"
@@ -171,6 +192,7 @@ class LocalMoveCreate(BaseModel):
 
 class LocalGameFinish(BaseModel):
     result: str
+    result_reason: str = "manual"
     pgn: Optional[str] = None
     final_fen: Optional[str] = None
 
@@ -180,6 +202,8 @@ class LocalPuzzleAttemptCreate(BaseModel):
     correct: bool
     attempts: int = 1
     time_taken: Optional[int] = None
+    puzzle_rating: Optional[int] = None
+    themes: list[str] = []
 
 
 class ConnectionManager:
@@ -279,32 +303,84 @@ def validate_puzzle_route(payload: PuzzleValidationCreate):
 
 @app.get("/api/local/profile")
 def get_local_profile():
-    with get_connection() as conn:
-        row = conn.execute("SELECT * FROM local_profile WHERE id = 1").fetchone()
-    return row_to_dict(row)
+    return get_active_player()
 
 
 @app.put("/api/local/profile")
 def update_local_profile(payload: LocalProfileUpdate):
-    username = payload.username.strip()
-    if not username or len(username) > 24:
-        raise HTTPException(status_code=400, detail="Username must be 1-24 characters")
-    with get_connection() as conn:
-        conn.execute("UPDATE local_profile SET username = ? WHERE id = 1", (username,))
-        conn.commit()
-        row = conn.execute("SELECT * FROM local_profile WHERE id = 1").fetchone()
-    return row_to_dict(row)
+    try:
+        return update_player(get_active_player()["id"], payload.username)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/local/players")
+def list_local_players():
+    active = get_active_player()
+    return {"active_player_id": active["id"], "players": get_all_players()}
+
+
+@app.post("/api/local/players")
+def create_local_player(payload: LocalPlayerCreate):
+    try:
+        return set_active_player(create_player(payload.username)["id"])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/local/players/{player_id}/activate")
+def activate_local_player(player_id: int):
+    try:
+        return set_active_player(player_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/local/settings")
+def get_local_settings():
+    return get_all_settings(get_active_player()["id"])
+
+
+@app.put("/api/local/settings")
+def update_local_setting(payload: LocalSettingUpdate):
+    try:
+        set_setting(get_active_player()["id"], payload.key, payload.value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return get_all_settings(get_active_player()["id"])
 
 
 @app.post("/api/local/games")
 def create_local_game(payload: LocalGameCreate):
+    active = get_active_player()
+    white_name = payload.white_name.strip() or "Player"
+    black_name = payload.black_name.strip() or "Opponent"
+    if white_name == active["username"]:
+        player_color = "white"
+        opponent_name = black_name
+    elif black_name == active["username"]:
+        player_color = "black"
+        opponent_name = white_name
+    else:
+        player_color = "unknown"
+        opponent_name = black_name
+    opponent_type = "local_player" if payload.mode in {"local", "local_1v1"} else "bot"
+    if "stockfish" in opponent_name.lower():
+        opponent_type = "stockfish"
     with get_connection() as conn:
         cur = conn.execute(
             """
-            INSERT INTO local_games (white_name, black_name, mode)
-            VALUES (?, ?, ?)
+            INSERT INTO local_games
+                (player_id, white_name, black_name, mode, opponent_type,
+                 opponent_name, player_color, starting_fen, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (payload.white_name.strip() or "Player", payload.black_name.strip() or "Opponent", payload.mode),
+            (
+                active["id"], white_name, black_name,
+                "local_1v1" if payload.mode == "local" else payload.mode,
+                opponent_type, opponent_name, player_color, chess.Board().fen(),
+                datetime.now().astimezone().isoformat(timespec="seconds"),
+            ),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM local_games WHERE id = ?", (cur.lastrowid,)).fetchone()
@@ -317,7 +393,8 @@ def save_local_move(game_id: int, payload: LocalMoveCreate):
         game = conn.execute("SELECT id FROM local_games WHERE id = ?", (game_id,)).fetchone()
         if game is None:
             raise HTTPException(status_code=404, detail="Local game not found")
-        board = chess.Board()
+        game = conn.execute("SELECT * FROM local_games WHERE id = ?", (game_id,)).fetchone()
+        board = chess.Board(game["starting_fen"] or chess.STARTING_FEN)
         previous_moves = conn.execute(
             "SELECT uci FROM local_moves WHERE game_id = ? ORDER BY ply, id",
             (game_id,),
@@ -328,18 +405,32 @@ def save_local_move(game_id: int, payload: LocalMoveCreate):
             move = chess.Move.from_uci(payload.uci)
             if move not in board.legal_moves:
                 raise ValueError("illegal move")
+            fen_before = board.fen()
+            color = "white" if board.turn == chess.WHITE else "black"
             expected_san = board.san(move)
             board.push(move)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=f"Move rejected by python-chess: {exc}") from exc
         if expected_san != payload.san:
             raise HTTPException(status_code=400, detail="SAN does not match the validated move")
+        stored_ply = len(previous_moves) + 1
         cur = conn.execute(
             """
-            INSERT INTO local_moves (game_id, ply, uci, san, fen_after, time_left)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO local_moves
+                (game_id, ply, uci, san, move_number, color, fen_before,
+                 fen_after, moved_at, time_left)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (game_id, payload.ply, payload.uci, expected_san, board.fen(), payload.time_left),
+            (
+                game_id, stored_ply, payload.uci, expected_san,
+                (stored_ply + 1) // 2, color, fen_before, board.fen(),
+                datetime.now().astimezone().isoformat(timespec="seconds"),
+                payload.time_left,
+            ),
+        )
+        conn.execute(
+            "UPDATE local_games SET total_moves = ?, updated_at = ? WHERE id = ?",
+            (stored_ply, datetime.now().astimezone().isoformat(timespec="seconds"), game_id),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM local_moves WHERE id = ?", (cur.lastrowid,)).fetchone()
@@ -356,7 +447,11 @@ def delete_last_local_move(game_id: int):
         if row is None:
             return {"deleted": False}
         conn.execute("DELETE FROM local_moves WHERE id = ?", (row["id"],))
-        conn.execute("UPDATE local_games SET result = '*', ended_at = NULL WHERE id = ?", (game_id,))
+        count = conn.execute("SELECT COUNT(*) AS count FROM local_moves WHERE game_id = ?", (game_id,)).fetchone()["count"]
+        conn.execute(
+            "UPDATE local_games SET result = '*', result_reason = NULL, total_moves = ?, ended_at = NULL WHERE id = ?",
+            (count, game_id),
+        )
         conn.commit()
     return {"deleted": True}
 
@@ -369,10 +464,12 @@ def finish_local_game(game_id: int, payload: LocalGameFinish):
         cur = conn.execute(
             """
             UPDATE local_games
-            SET result = ?, pgn = ?, final_fen = ?, ended_at = CURRENT_TIMESTAMP
+            SET result = ?, result_reason = ?, pgn = ?, final_fen = ?,
+                total_moves = (SELECT COUNT(*) FROM local_moves WHERE game_id = ?),
+                updated_at = CURRENT_TIMESTAMP, ended_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
-            (payload.result, payload.pgn, payload.final_fen, game_id),
+            (payload.result, payload.result_reason, payload.pgn, payload.final_fen, game_id, game_id),
         )
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="Local game not found")
@@ -383,13 +480,21 @@ def finish_local_game(game_id: int, payload: LocalGameFinish):
 
 @app.post("/api/local/puzzle-attempts")
 def save_local_puzzle_attempt(payload: LocalPuzzleAttemptCreate):
+    player = get_active_player()
+    themes = json.dumps(payload.themes or [])
     with get_connection() as conn:
         cur = conn.execute(
             """
-            INSERT INTO local_puzzle_attempts (puzzle_id, correct, attempts, time_taken)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO local_puzzle_attempts
+                (player_id, puzzle_id, puzzle_rating, themes, correct, attempts,
+                 time_taken, attempted_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (payload.puzzle_id, int(payload.correct), max(1, payload.attempts), payload.time_taken),
+            (
+                player["id"], payload.puzzle_id, payload.puzzle_rating, themes,
+                int(payload.correct), max(1, payload.attempts), payload.time_taken,
+                datetime.now().astimezone().isoformat(timespec="seconds"),
+            ),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM local_puzzle_attempts WHERE id = ?", (cur.lastrowid,)).fetchone()
@@ -397,42 +502,8 @@ def save_local_puzzle_attempt(payload: LocalPuzzleAttemptCreate):
 
 
 def _local_stats():
-    with get_connection() as conn:
-        profile = conn.execute("SELECT * FROM local_profile WHERE id = 1").fetchone()
-        games = conn.execute("SELECT * FROM local_games ORDER BY created_at DESC, id DESC").fetchall()
-        attempts = conn.execute("SELECT * FROM local_puzzle_attempts").fetchall()
-    username = profile["username"]
-    wins = losses = draws = 0
-    bot_games = 0
-    bot_wins = 0
-    for game in games:
-        is_white = game["white_name"] == username
-        is_black = game["black_name"] == username
-        if game["mode"] == "bot":
-            bot_games += 1
-        if game["result"] == "1/2-1/2":
-            draws += 1
-        elif (is_white and game["result"] == "1-0") or (is_black and game["result"] == "0-1"):
-            wins += 1
-            if game["mode"] == "bot":
-                bot_wins += 1
-        elif (is_white and game["result"] == "0-1") or (is_black and game["result"] == "1-0"):
-            losses += 1
-    solved = sum(1 for attempt in attempts if attempt["correct"])
-    return {
-        "profile": row_to_dict(profile),
-        "games_played": len(games),
-        "wins": wins,
-        "losses": losses,
-        "draws": draws,
-        "bot_games": bot_games,
-        "bot_wins": bot_wins,
-        "puzzle_attempts": len(attempts),
-        "puzzles_solved": solved,
-        "puzzle_accuracy": round(solved / len(attempts), 3) if attempts else 0,
-        "recent_games": [row_to_dict(game) for game in games[:10]],
-        "recent_puzzles": [row_to_dict(attempt) for attempt in attempts[-10:]],
-    }
+    profile = get_active_player()
+    return {"profile": profile, **get_player_stats(profile["id"])}
 
 
 @app.get("/api/local/stats")
@@ -442,14 +513,7 @@ def local_stats():
 
 @app.get("/api/local/leaderboard")
 def local_leaderboard():
-    stats = _local_stats()
-    username = stats["profile"]["username"]
-    return [
-        {"category": "Most games played", "username": username, "score": stats["games_played"]},
-        {"category": "Most puzzle solves", "username": username, "score": stats["puzzles_solved"]},
-        {"category": "Best puzzle accuracy", "username": username, "score": stats["puzzle_accuracy"]},
-        {"category": "Bot win count", "username": username, "score": stats["bot_wins"]},
-    ]
+    return get_local_leaderboard()
 
 
 @app.post("/api/auth/register")

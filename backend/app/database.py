@@ -92,16 +92,51 @@ CREATE TABLE IF NOT EXISTS local_profile (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS players (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    display_name TEXT,
+    avatar TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_active_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS active_profile (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    player_id INTEGER,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (player_id) REFERENCES players(id)
+);
+
+CREATE TABLE IF NOT EXISTS player_settings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    player_id INTEGER NOT NULL,
+    setting_key TEXT NOT NULL,
+    setting_value TEXT NOT NULL,
+    UNIQUE(player_id, setting_key),
+    FOREIGN KEY (player_id) REFERENCES players(id)
+);
+
 CREATE TABLE IF NOT EXISTS local_games (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    player_id INTEGER,
     white_name TEXT NOT NULL,
     black_name TEXT NOT NULL,
     mode TEXT NOT NULL,
+    opponent_type TEXT NOT NULL DEFAULT 'human',
+    opponent_name TEXT,
+    player_color TEXT,
     result TEXT NOT NULL DEFAULT '*',
+    result_reason TEXT,
     pgn TEXT,
+    starting_fen TEXT,
     final_fen TEXT,
+    total_moves INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    ended_at TEXT
+    updated_at TEXT,
+    ended_at TEXT,
+    FOREIGN KEY (player_id) REFERENCES players(id)
 );
 
 CREATE TABLE IF NOT EXISTS local_moves (
@@ -110,18 +145,27 @@ CREATE TABLE IF NOT EXISTS local_moves (
     ply INTEGER NOT NULL,
     uci TEXT NOT NULL,
     san TEXT NOT NULL,
+    move_number INTEGER,
+    color TEXT,
+    fen_before TEXT,
     fen_after TEXT NOT NULL,
+    moved_at TEXT,
     time_left INTEGER,
     FOREIGN KEY (game_id) REFERENCES local_games(id)
 );
 
 CREATE TABLE IF NOT EXISTS local_puzzle_attempts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    player_id INTEGER,
     puzzle_id TEXT NOT NULL,
+    puzzle_rating INTEGER,
+    themes TEXT,
     correct INTEGER NOT NULL CHECK (correct IN (0, 1)),
     attempts INTEGER NOT NULL DEFAULT 1,
     time_taken INTEGER,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    attempted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (player_id) REFERENCES players(id)
 );
 
 CREATE TABLE IF NOT EXISTS settings (
@@ -143,6 +187,7 @@ def init_db():
         conn.executescript(SCHEMA)
         conn.execute("INSERT OR IGNORE INTO local_profile (id, username) VALUES (1, 'Player')")
         _ensure_user_columns(conn)
+        _ensure_local_columns(conn)
         conn.commit()
 
 
@@ -163,6 +208,71 @@ def _ensure_user_columns(conn):
                     conn.execute("ALTER TABLE users ADD COLUMN google_sub TEXT")
                 else:
                     raise
+
+
+def _ensure_local_columns(conn):
+    """Migrate the original single-profile tables without losing local data."""
+    columns_by_table = {
+        "local_games": {
+            "player_id": "INTEGER",
+            "opponent_type": "TEXT NOT NULL DEFAULT 'human'",
+            "opponent_name": "TEXT",
+            "player_color": "TEXT",
+            "result_reason": "TEXT",
+            "starting_fen": "TEXT",
+            "total_moves": "INTEGER NOT NULL DEFAULT 0",
+            "updated_at": "TEXT",
+        },
+        "local_moves": {
+            "move_number": "INTEGER",
+            "color": "TEXT",
+            "fen_before": "TEXT",
+            "moved_at": "TEXT",
+        },
+        "local_puzzle_attempts": {
+            "player_id": "INTEGER",
+            "puzzle_rating": "INTEGER",
+            "themes": "TEXT",
+            "attempted_at": "TEXT",
+        },
+    }
+    for table, columns in columns_by_table.items():
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        for name, definition in columns.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO players
+            (username, display_name, created_at, updated_at, last_active_at)
+        SELECT username, username, created_at, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+        FROM local_profile WHERE id = 1
+        """
+    )
+    player = conn.execute("SELECT id FROM players ORDER BY id LIMIT 1").fetchone()
+    if player:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO active_profile (id, player_id, updated_at)
+            VALUES (1, ?, CURRENT_TIMESTAMP)
+            """,
+            (player["id"],),
+        )
+        conn.execute(
+            "UPDATE local_games SET player_id = ? WHERE player_id IS NULL",
+            (player["id"],),
+        )
+        conn.execute(
+            "UPDATE local_puzzle_attempts SET player_id = ? WHERE player_id IS NULL",
+            (player["id"],),
+        )
+
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_local_games_player_id ON local_games(player_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_local_moves_game_id ON local_moves(game_id)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_local_puzzle_attempts_player_id ON local_puzzle_attempts(player_id)"
+    )
 
 
 def row_to_dict(row):
