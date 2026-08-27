@@ -12,6 +12,20 @@ const API_TARGET = import.meta.env.VITE_API_TARGET || "";
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
 const pieceCodes = { p: "P", n: "N", b: "B", r: "R", q: "Q", k: "K" };
 const INITIAL_CLOCK = 10 * 60;
+const MATCH_INTENTIONS = [
+  { value: "none", label: "Play freely" },
+  { value: "castle_early", label: "Castle early" },
+  { value: "develop_first", label: "Develop before attacking" },
+  { value: "protect_my_queen", label: "Protect my queen" },
+  { value: "slow_down", label: "Slow down and look twice" }
+];
+const MATCH_REFLECTIONS = [
+  { value: "experimenting", label: "I was experimenting" },
+  { value: "learning", label: "I was learning" },
+  { value: "patient", label: "I played patiently" },
+  { value: "panicked", label: "I panicked" },
+  { value: "fun", label: "Just playing for fun" }
+];
 const SOUND_FILES = {
   move: "/assets/sounds/move.mp3",
   capture: "/assets/sounds/capture.mp3",
@@ -64,6 +78,7 @@ function App() {
   const [user, setUser] = useState(null);
   const [botConfig, setBotConfig] = useState(null);
   const [localStats, setLocalStats] = useState(null);
+  const [analysisGameId, setAnalysisGameId] = useState("");
 
   function refreshLocalStats() {
     return apiFetch("/api/local/stats").then(setLocalStats).catch(() => null);
@@ -101,6 +116,11 @@ function App() {
     setUser(null);
   }
 
+  function openAnalysis(gameId = "") {
+    setAnalysisGameId(gameId ? String(gameId) : "");
+    setPage("Analysis");
+  }
+
   return (
     <main className="app-shell">
       <Starfield />
@@ -123,14 +143,15 @@ function App() {
       </nav>
 
       {page === "Home" && <HomePage onPlay={() => { setBotConfig(null); setPage("Play"); }} onProfile={() => setPage("Profile")} />}
-      {page === "Play" && <PlayPage botConfig={botConfig} />}
+      {page === "Play" && <PlayPage botConfig={botConfig} onOpenAnalysis={openAnalysis} />}
       {page === "Bot Battle" && <BotBattlePage onStart={(config) => { setBotConfig(config); setPage("Play"); }} />}
       {page === "Puzzle" && <PuzzlePage />}
-      {page === "Analysis" && <AnalysisPage />}
+      {page === "Analysis" && <AnalysisPage initialGameId={analysisGameId} />}
       {page === "Profile" && (
         <ProfilePage
           localStats={localStats}
           onRefresh={refreshLocalStats}
+          onOpenAnalysis={openAnalysis}
         />
       )}
       {page === "Leaderboard" && <LeaderboardPage localStats={localStats} />}
@@ -198,9 +219,10 @@ function ThemePreview() {
   );
 }
 
-function PlayPage({ botConfig }) {
+function PlayPage({ botConfig, onOpenAnalysis }) {
   const gameRef = useRef(new Chess());
   const localGamePromise = useRef(null);
+  const moveSaveChain = useRef(Promise.resolve());
   const finishedRef = useRef(false);
   const [board, setBoard] = useState(gameRef.current.board());
   const [selected, setSelected] = useState(null);
@@ -212,6 +234,11 @@ function PlayPage({ botConfig }) {
   const [gameOver, setGameOver] = useState("");
   const [socketStatus, setSocketStatus] = useState("offline");
   const [flipOffset, setFlipOffset] = useState(false);
+  const [localGameId, setLocalGameId] = useState(null);
+  const [gameIntention, setGameIntention] = useState("none");
+  const [reflection, setReflection] = useState("");
+  const [reflectionNote, setReflectionNote] = useState("");
+  const [reflectionSaved, setReflectionSaved] = useState(false);
   const [chat, setChat] = useState([
     { from: "system", text: "Welcome to CHESS V2." },
     { from: "meme", text: "Capture memes will live here." }
@@ -243,18 +270,27 @@ function PlayPage({ botConfig }) {
   const boardFlipped = botConfig ? flipOffset : (turn === "BLACK") !== flipOffset;
   const legalTargetSet = new Set(legalTargets.map((move) => move.to));
 
-  function createLocalGame() {
+  function createLocalGame(nextIntention = gameIntention) {
     const botName = botConfig?.label || "Opponent";
     const whiteName = botConfig?.color === "w" ? botName : "Player";
     const blackName = botConfig?.color === "b" ? botName : "Player";
-    localGamePromise.current = apiFetch("/api/local/games", {
+    const request = apiFetch("/api/local/games", {
       method: "POST",
       body: JSON.stringify({
         white_name: whiteName,
         black_name: blackName,
-        mode: botConfig ? "bot" : "local"
+        mode: botConfig ? "bot" : "local",
+        time_control: "10+0",
+        intention: nextIntention === "none" ? null : nextIntention
       })
-    }).catch(() => null);
+    });
+    localGamePromise.current = request
+      .then((game) => {
+        setLocalGameId(game?.id || null);
+        return game;
+      })
+      .catch(() => null);
+    moveSaveChain.current = Promise.resolve();
     finishedRef.current = false;
   }
 
@@ -277,39 +313,82 @@ function PlayPage({ botConfig }) {
     return () => window.removeEventListener("keydown", clearOnEscape);
   }, []);
 
-  async function saveMove(move) {
-    const game = await localGamePromise.current;
-    if (!game) {
-      return;
-    }
-    apiFetch(`/api/local/games/${game.id}/moves`, {
-      method: "POST",
-      body: JSON.stringify({
-        ply: gameRef.current.history().length - 1,
-        uci: `${move.from}${move.to}${move.promotion || ""}`,
-        san: move.san,
-        fen_after: gameRef.current.fen()
-      })
-    }).catch(() => {});
+  function saveMove(move) {
+    const currentGamePromise = localGamePromise.current;
+    const ply = gameRef.current.history().length;
+    const fenAfter = gameRef.current.fen();
+    const saveRequest = async () => {
+      const game = await currentGamePromise;
+      if (!game) {
+        return;
+      }
+      await apiFetch(`/api/local/games/${game.id}/moves`, {
+        method: "POST",
+        body: JSON.stringify({
+          ply,
+          uci: `${move.from}${move.to}${move.promotion || ""}`,
+          san: move.san,
+          fen_after: fenAfter,
+          time_left: timeLeft[move.color]
+        })
+      }).catch(() => {});
+    };
+    moveSaveChain.current = moveSaveChain.current.then(saveRequest, saveRequest);
+    return moveSaveChain.current;
   }
 
-  async function finishLocalGame(result) {
+  async function finishLocalGame(result, resultReason = "manual") {
     if (finishedRef.current) {
       return;
     }
     finishedRef.current = true;
+    setReflectionSaved(false);
     const game = await localGamePromise.current;
     if (!game) {
       return;
     }
+    await moveSaveChain.current;
     apiFetch(`/api/local/games/${game.id}/finish`, {
       method: "POST",
       body: JSON.stringify({
         result,
+        result_reason: resultReason,
         pgn: gameRef.current.pgn(),
         final_fen: gameRef.current.fen()
       })
     }).catch(() => {});
+  }
+
+  async function saveIntention(value) {
+    setGameIntention(value);
+    const game = await localGamePromise.current;
+    if (!game) {
+      return;
+    }
+    apiFetch(`/api/local/games/${game.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ intention: value === "none" ? null : value })
+    }).catch(() => {});
+  }
+
+  async function saveReflection() {
+    const game = await localGamePromise.current;
+    if (!game || !reflection) {
+      return;
+    }
+    try {
+      await apiFetch(`/api/local/games/${game.id}/reflection`, {
+        method: "POST",
+        body: JSON.stringify({
+          intention: gameIntention === "none" ? null : gameIntention,
+          feeling: reflection,
+          note: reflectionNote
+        })
+      });
+      setReflectionSaved(true);
+    } catch {
+      setReflectionSaved(false);
+    }
   }
 
   useEffect(() => {
@@ -329,7 +408,7 @@ function PlayPage({ botConfig }) {
         if (nextValue === 0) {
           const winner = active === "w" ? "Black" : "White";
           setGameOver(`${winner} wins on time`);
-          finishLocalGame(active === "w" ? "0-1" : "1-0");
+          finishLocalGame(active === "w" ? "0-1" : "1-0", "timeout");
         }
         return { ...current, [active]: nextValue };
       });
@@ -426,6 +505,7 @@ function PlayPage({ botConfig }) {
   }
 
   function commitMove(move, before = null, options = {}) {
+    saveMove(move);
     if (before || move.captured) {
       const capturedColor = move.color === "w" ? "b" : "w";
       const capturedType = move.captured || before?.type;
@@ -450,12 +530,12 @@ function PlayPage({ botConfig }) {
     if (gameRef.current.isCheckmate()) {
       playSound("checkmate");
       setGameOver(`${move.color === "w" ? "White" : "Black"} wins by checkmate`);
-      finishLocalGame(move.color === "w" ? "1-0" : "0-1");
+      finishLocalGame(move.color === "w" ? "1-0" : "0-1", "checkmate");
     } else if (gameRef.current.isCheck()) {
       playSound("check");
     } else if (gameRef.current.isDraw()) {
       setGameOver("Draw");
-      finishLocalGame("1/2-1/2");
+      finishLocalGame("1/2-1/2", "draw");
     }
     setSelected(null);
     setLegalTargets([]);
@@ -464,7 +544,6 @@ function PlayPage({ botConfig }) {
     }
     setBoard(gameRef.current.board());
     setMoves(gameRef.current.history({ verbose: true }));
-    saveMove(move);
   }
 
   useEffect(() => {
@@ -531,7 +610,11 @@ function PlayPage({ botConfig }) {
     setTimeLeft({ w: INITIAL_CLOCK, b: INITIAL_CLOCK });
     setGameOver("");
     setMoves([]);
-    createLocalGame();
+    setGameIntention("none");
+    setReflection("");
+    setReflectionNote("");
+    setReflectionSaved(false);
+    createLocalGame("none");
   }
 
   async function undoMove() {
@@ -579,20 +662,43 @@ function PlayPage({ botConfig }) {
         {gameOver && <div className="socket-pill danger-pill">{gameOver}</div>}
         <TimerBlock label="BLACK" time={formatClock(timeLeft.b)} active={turn === "BLACK"} />
         <TimerBlock label="WHITE" time={formatClock(timeLeft.w)} active={turn === "WHITE"} />
+        <section className="panel-section intention-panel">
+          <h3>Match intention</h3>
+          <select
+            value={gameIntention}
+            disabled={moveHistory.length > 0 || Boolean(gameOver)}
+            onChange={(event) => saveIntention(event.target.value)}
+          >
+            {MATCH_INTENTIONS.map((item) => <option value={item.value} key={item.value}>{item.label}</option>)}
+          </select>
+          <p>Optional. Give this game one small purpose.</p>
+        </section>
         <CapturedPieces captured={captured} />
         <MoveHistory moves={moveHistory} />
         <div className="action-row">
           <button onClick={() => {
             const humanColor = botConfig?.color === "w" ? "b" : "w";
             setGameOver("You resigned");
-            finishLocalGame(humanColor === "w" ? "0-1" : "1-0");
+            finishLocalGame(humanColor === "w" ? "0-1" : "1-0", "resignation");
           }}>Resign</button>
-          <button onClick={() => { setGameOver("Draw agreed"); finishLocalGame("1/2-1/2"); }}>Draw</button>
+          <button onClick={() => { setGameOver("Draw agreed"); finishLocalGame("1/2-1/2", "agreement"); }}>Draw</button>
           <button onClick={undoMove}>Undo</button>
           <button onClick={resetGame}>Reset</button>
           <button onClick={() => setFlipOffset((value) => !value)}>Flip</button>
         </div>
         <ChatPanel chat={chat} />
+        {gameOver && (
+          <ReflectionPanel
+            reflection={reflection}
+            note={reflectionNote}
+            saved={reflectionSaved}
+            onReflection={setReflection}
+            onNote={setReflectionNote}
+            onSave={saveReflection}
+            onOpenAnalysis={() => onOpenAnalysis?.(localGameId)}
+            canOpenAnalysis={Boolean(localGameId)}
+          />
+        )}
       </aside>
     </section>
   );
@@ -697,6 +803,49 @@ function ChatPanel({ chat }) {
       <div className="chat-input">
         <input placeholder="Message" />
         <button>Send</button>
+      </div>
+    </section>
+  );
+}
+
+function ReflectionPanel({
+  reflection,
+  note,
+  saved,
+  onReflection,
+  onNote,
+  onSave,
+  onOpenAnalysis,
+  canOpenAnalysis
+}) {
+  return (
+    <section className="panel-section reflection-panel">
+      <h3>Keep a note from this game</h3>
+      <p>Your reflection is saved with this private match.</p>
+      <div className="reflection-options">
+        {MATCH_REFLECTIONS.map((item) => (
+          <button
+            type="button"
+            key={item.value}
+            className={`reflection-option ${reflection === item.value ? "active" : ""}`}
+            onClick={() => onReflection(item.value)}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+      <input
+        className="reflection-note"
+        value={note}
+        maxLength={500}
+        onChange={(event) => onNote(event.target.value)}
+        placeholder="Optional note about the game"
+      />
+      <div className="reflection-actions">
+        <button className="primary-action" type="button" disabled={!reflection} onClick={onSave}>
+          {saved ? "Reflection saved" : "Save reflection"}
+        </button>
+        <button type="button" disabled={!canOpenAnalysis} onClick={onOpenAnalysis}>Open Chronicle</button>
       </div>
     </section>
   );
@@ -1093,7 +1242,7 @@ function PuzzlePage() {
   );
 }
 
-function AnalysisPage() {
+function AnalysisPage({ initialGameId = "" }) {
   const [pgn, setPgn] = useState("");
   const [history, setHistory] = useState([]);
   const [selectedGameId, setSelectedGameId] = useState("");
@@ -1103,6 +1252,7 @@ function AnalysisPage() {
   const [selectedPly, setSelectedPly] = useState(null);
   const [memeMode, setMemeMode] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
+  const [chronicleLoading, setChronicleLoading] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -1110,7 +1260,8 @@ function AnalysisPage() {
     apiFetch("/api/local/games/history?limit=50")
       .then((data) => {
         if (!cancelled) {
-          setHistory(data.games || []);
+          const games = data.games || [];
+          setHistory(games);
         }
       })
       .catch(() => {
@@ -1126,25 +1277,55 @@ function AnalysisPage() {
     return () => { cancelled = true; };
   }, []);
 
-  function chooseSavedGame(event) {
-    const gameId = event.target.value;
+  async function selectSavedGame(gameId, records = history) {
     setSelectedGameId(gameId);
-    const game = history.find((item) => String(item.id) === gameId);
+    const game = records.find((item) => String(item.id) === gameId);
+    setAnalysis(null);
+    setError("");
     if (game?.pgn) {
       setPgn(game.pgn);
-      setError("");
+      if (game.chronicle_updated_at) {
+        setChronicleLoading(true);
+        try {
+          const saved = await apiFetch(`/api/local/games/${game.id}/chronicle`);
+          if (saved.report) {
+            setAnalysis(saved.report);
+            setSelectedPly(saved.report.moves?.[saved.report.moves.length - 1]?.ply || null);
+          }
+        } catch {
+          // A saved match can still be analyzed again if its Chronicle is unavailable.
+        } finally {
+          setChronicleLoading(false);
+        }
+      } else if (initialGameId && String(initialGameId) === gameId) {
+        void runAnalysis(game.id, game.pgn);
+      }
     }
   }
 
-  async function analyzeGame(event) {
-    event.preventDefault();
+  function chooseSavedGame(event) {
+    void selectSavedGame(event.target.value);
+  }
+
+  useEffect(() => {
+    if (initialGameId && history.length) {
+      void selectSavedGame(String(initialGameId), history);
+    }
+  }, [initialGameId, history.length]);
+
+  async function runAnalysis(gameId, gamePgn) {
     setError("");
     setAnalysis(null);
     setAnalyzing(true);
     try {
       const result = await apiFetch("/api/analysis", {
         method: "POST",
-        body: JSON.stringify({ pgn, skill_level: Number(skillLevel), analysis_time: 0.25, max_plies: 120 })
+        body: JSON.stringify({
+          ...(gameId ? { game_id: Number(gameId) } : { pgn: gamePgn }),
+          skill_level: Number(skillLevel),
+          analysis_time: 0.25,
+          max_plies: 120
+        })
       });
       setAnalysis(result);
       setSelectedPly(result.moves.length ? result.moves[result.moves.length - 1].ply : null);
@@ -1155,6 +1336,11 @@ function AnalysisPage() {
     }
   }
 
+  async function analyzeGame(event) {
+    event.preventDefault();
+    await runAnalysis(selectedGameId ? Number(selectedGameId) : null, pgn);
+  }
+
   const currentMove = analysis?.moves.find((move) => move.ply === selectedPly)
     || analysis?.summary?.turning_point
     || analysis?.moves?.[analysis.moves.length - 1];
@@ -1162,12 +1348,12 @@ function AnalysisPage() {
 
   return (
     <section className="page tool-layout analysis-page">
-      <h1>Analysis</h1>
+      <h1>{analysis ? "Match Chronicle" : "Analysis"}</h1>
       <form className="tool-panel analysis-input" onSubmit={analyzeGame}>
         <div className="analysis-input-heading">
           <div>
-            <h3>Paste a game for autopsy</h3>
-            <p>Chess V2 compares every move against a local Stockfish line.</p>
+            <h3>Choose a game to remember</h3>
+            <p>Saved matches become private Chronicles with factual Stockfish evidence.</p>
           </div>
           <label>
             Engine strength
@@ -1190,9 +1376,10 @@ function AnalysisPage() {
             ))}
           </select>
           {historyLoading && <span className="analysis-help">Loading saved matches...</span>}
+          {chronicleLoading && <span className="analysis-help">Loading saved Chronicle...</span>}
           {!historyLoading && !history.length && <span className="analysis-help">Completed matches will appear here.</span>}
         </label>
-        <textarea value={pgn} onChange={(event) => setPgn(event.target.value)} placeholder="Paste PGN here" />
+        <textarea value={pgn} onChange={(event) => { setPgn(event.target.value); setSelectedGameId(""); setAnalysis(null); }} placeholder="Paste PGN here" />
         <div className="analysis-input-actions">
           <button className="primary-action" type="submit" disabled={analyzing}>{analyzing ? "Analyzing..." : "Analyze game"}</button>
           <button type="button" onClick={() => { setPgn(""); setSelectedGameId(""); setAnalysis(null); setError(""); }}>Clear PGN</button>
@@ -1219,6 +1406,21 @@ function AnalysisPage() {
             </div>
             <div className="analysis-result-mark">{analysis.game_info.result || "*"}</div>
           </article>
+          <p className="chronicle-status">
+            {analysis.game_info.source === "saved_game"
+              ? (analysis.chronicle_saved ? "Private Chronicle saved with this match." : "Private saved match.")
+              : "Imported PGN · this report is not attached to match history."}
+            {analysis.engine && ` · ${analysis.engine.name} strength ${analysis.engine.skill_level}`}
+          </p>
+
+          {analysis.reflection && (analysis.reflection.intention || analysis.reflection.feeling || analysis.reflection.note) && (
+            <article className="tool-panel chronicle-reflection">
+              <div className="analysis-section-heading"><h3>Your reflection</h3><span>Player-authored</span></div>
+              {analysis.reflection.intention && <p><strong>Intention:</strong> {MATCH_INTENTIONS.find((item) => item.value === analysis.reflection.intention)?.label || analysis.reflection.intention}</p>}
+              {analysis.reflection.feeling && <p><strong>After the game:</strong> {MATCH_REFLECTIONS.find((item) => item.value === analysis.reflection.feeling)?.label || analysis.reflection.feeling}</p>}
+              {analysis.reflection.note && <p><strong>Note:</strong> {analysis.reflection.note}</p>}
+            </article>
+          )}
 
           <div className="analysis-stat-grid">
             <AnalysisStat label="White accuracy" value={`${analysis.summary.accuracy_white}%`} />
@@ -1249,6 +1451,8 @@ function AnalysisPage() {
             <div className="pulse-axis"><span>Opening</span><span>Middlegame</span><span>Endgame</span></div>
           </article>
 
+          <PressureMap timeline={analysis.evaluation_timeline} moments={analysis.pressure_moments || []} />
+
           <div className="analysis-two-column">
             <article className="tool-panel">
               <div className="analysis-section-heading"><h3>Critical moments</h3><span>{analysis.critical_moments.length}</span></div>
@@ -1267,6 +1471,8 @@ function AnalysisPage() {
               {currentMove && <div className="position-details"><strong>{currentMove.played_move_san} <span>vs</span> {currentMove.best_move_san}</strong><p>{currentMove.commentary}</p><small>{currentMove.eval_before_display} → {currentMove.eval_after_display}</small></div>}
             </article>
           </div>
+
+          {currentMove && <TryMomentPanel move={currentMove} skillLevel={skillLevel} />}
 
           <div className="analysis-two-column">
             <AnalysisMoveCard title="Best move" move={analysis.summary.best_move} />
@@ -1306,6 +1512,176 @@ function AnalysisPage() {
   );
 }
 
+function PressureMap({ timeline = [], moments = [] }) {
+  const points = timeline.filter((point) => Number.isFinite(point.time_left));
+  if (!points.length) {
+    return (
+      <article className="tool-panel pressure-map">
+        <div className="analysis-section-heading"><h3>Pressure map</h3><span>Clock evidence</span></div>
+        <p className="pressure-no-data">Clock data will appear for games recorded with Chess V2 clocks.</p>
+      </article>
+    );
+  }
+  const maxTime = Math.max(1, ...points.map((point) => point.time_left));
+  return (
+    <article className="tool-panel pressure-map">
+      <div className="analysis-section-heading">
+        <div><span className="analysis-eyebrow">Recorded time remaining</span><h3>Pressure map</h3></div>
+        <span>{moments.length} pressure moment{moments.length === 1 ? "" : "s"}</span>
+      </div>
+      <div className="pressure-track">
+        {points.map((point) => (
+          <span
+            className={`pressure-point pressure-${point.classification}`}
+            key={point.ply}
+            title={`Ply ${point.ply} · ${formatClock(point.time_left)} left · ${point.classification}`}
+            style={{ height: `${Math.max(10, (point.time_left / maxTime) * 100)}%` }}
+          />
+        ))}
+      </div>
+      <div className="pressure-moments">
+        {moments.length ? moments.map((moment) => (
+          <span key={moment.ply}>Ply {moment.ply}: {formatClock(moment.time_left)} left · {moment.classification}</span>
+        )) : <span>No move was recorded below the pressure threshold.</span>}
+      </div>
+    </article>
+  );
+}
+
+function TryMomentPanel({ move, skillLevel }) {
+  const [tryGame, setTryGame] = useState(null);
+  const [selected, setSelected] = useState(null);
+  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!move?.fen_before) {
+      setTryGame(null);
+      return;
+    }
+    try {
+      setTryGame(new Chess(move.fen_before));
+      setSelected(null);
+      setResult(null);
+      setError("");
+    } catch {
+      setTryGame(null);
+      setError("This moment could not be replayed.");
+    }
+  }, [move?.ply, move?.fen_before]);
+
+  function squareName(row, col) {
+    return "abcdefgh"[col] + (8 - row);
+  }
+
+  async function compareMove(game, played) {
+    setLoading(true);
+    setError("");
+    try {
+      const comparison = await apiFetch("/api/analysis/try-moment", {
+        method: "POST",
+        body: JSON.stringify({
+          fen: move.fen_before,
+          move_uci: `${played.from}${played.to}${played.promotion || ""}`,
+          skill_level: Number(skillLevel),
+          analysis_time: 0.25
+        })
+      });
+      setResult(comparison);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function handleSquare(row, col) {
+    if (!tryGame || loading) {
+      return;
+    }
+    const square = squareName(row, col);
+    const piece = tryGame.get(square);
+    if (!selected) {
+      if (piece && piece.color === tryGame.turn()) {
+        setSelected(square);
+      }
+      return;
+    }
+    if (selected === square) {
+      setSelected(null);
+      return;
+    }
+    if (piece && piece.color === tryGame.turn()) {
+      setSelected(square);
+      return;
+    }
+    const nextGame = new Chess(tryGame.fen());
+    let played;
+    try {
+      played = nextGame.move({ from: selected, to: square, promotion: "q" });
+    } catch {
+      played = null;
+    }
+    if (!played) {
+      setSelected(null);
+      return;
+    }
+    setTryGame(nextGame);
+    setSelected(null);
+    void compareMove(tryGame, played);
+  }
+
+  function resetMoment() {
+    if (!move?.fen_before) {
+      return;
+    }
+    setTryGame(new Chess(move.fen_before));
+    setSelected(null);
+    setResult(null);
+    setError("");
+  }
+
+  const legalTargets = new Set(
+    selected && tryGame
+      ? tryGame.moves({ verbose: true }).filter((candidate) => candidate.from === selected).map((candidate) => candidate.to)
+      : []
+  );
+
+  return (
+    <article className="tool-panel try-moment">
+      <div className="analysis-section-heading">
+        <div><span className="analysis-eyebrow">Interactive replay</span><h3>Try the moment</h3></div>
+        <span>{move ? `Ply ${move.ply}` : "-"}</span>
+      </div>
+      <p>Play a legal move from this position. Stockfish will compare it with the preferred move.</p>
+      {tryGame && (
+        <ChessBoard
+          board={tryGame.board()}
+          selected={selected}
+          premove={null}
+          legalTargets={legalTargets}
+          onSquare={handleSquare}
+          onClearSelection={() => setSelected(null)}
+        />
+      )}
+      <div className="try-moment-actions">
+        <button type="button" onClick={resetMoment} disabled={loading}>Reset position</button>
+        {loading && <span className="analysis-progress">Comparing your move...</span>}
+      </div>
+      {error && <p className="form-error">{error}</p>}
+      {result && (
+        <div className={`try-result ${["best", "good"].includes(result.classification) ? "try-result-good" : "try-result-danger"}`}>
+          <strong>{result.played_move_san} · {result.classification}</strong>
+          <span>Stockfish preferred {result.best_move_san}.</span>
+          <span>{result.eval_before_display} → {result.eval_after_display} · evaluation loss {result.eval_loss.toFixed(2)}</span>
+          <p>{result.commentary}</p>
+        </div>
+      )}
+    </article>
+  );
+}
+
 function AnalysisStat({ label, value }) {
   return <div className="analysis-stat"><strong>{value}</strong><span>{label}</span></div>;
 }
@@ -1328,7 +1704,7 @@ function memeComment(move) {
   return "You had one job.";
 }
 
-function ProfilePage({ localStats, onRefresh }) {
+function ProfilePage({ localStats, onRefresh, onOpenAnalysis }) {
   const identity = localStats?.profile || { id: 1, username: "Player" };
   const [players, setPlayers] = useState([]);
   const [history, setHistory] = useState([]);
@@ -1494,7 +1870,13 @@ function ProfilePage({ localStats, onRefresh }) {
             <div className="activity-row" key={game.id}>
               <strong className={`result-${game.player_result}`}>{game.player_result}</strong>
               <span>vs {game.opponent_display || "Opponent"} · {game.total_moves || 0} moves</span>
-              <small>{game.result_reason || game.mode || "game"} · {game.date || "recently"}{game.pgn ? " · ready for analysis" : ""}</small>
+              <small>
+                {game.result_reason || game.mode || "game"} · {game.date || "recently"}
+                {game.pgn ? " · ready for analysis" : ""}
+                {game.chronicle_updated_at ? " · Chronicle ready" : ""}
+                {game.reflection_feeling ? ` · ${MATCH_REFLECTIONS.find((item) => item.value === game.reflection_feeling)?.label || game.reflection_feeling}` : ""}
+              </small>
+              {game.pgn && <button className="history-action" type="button" onClick={() => onOpenAnalysis?.(game.id)}>Open Chronicle</button>}
             </div>
           )) : <p>No completed games yet.</p>}
         </div>

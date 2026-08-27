@@ -207,14 +207,171 @@ def get_game_history(player_id: int, limit: int = 50) -> list[dict[str, Any]]:
     with get_connection() as conn:
         rows = conn.execute(
             """
-            SELECT * FROM local_games
-            WHERE player_id = ?
-            ORDER BY COALESCE(ended_at, updated_at, created_at) DESC, id DESC
+            SELECT local_games.*,
+                   reflections.intention AS reflection_intention,
+                   reflections.feeling AS reflection_feeling,
+                   reflections.note AS reflection_note,
+                   chronicles.updated_at AS chronicle_updated_at
+            FROM local_games
+            LEFT JOIN local_game_reflections AS reflections
+                ON reflections.game_id = local_games.id
+            LEFT JOIN local_chronicles AS chronicles
+                ON chronicles.game_id = local_games.id
+            WHERE local_games.player_id = ?
+            ORDER BY COALESCE(local_games.ended_at, local_games.updated_at, local_games.created_at) DESC,
+                     local_games.id DESC
             LIMIT ?
             """,
             (player_id, safe_limit),
         ).fetchall()
     return [_decorate_game(row, player) for row in rows]
+
+
+def get_local_game_record(player_id: int, game_id: int) -> Optional[dict[str, Any]]:
+    """Return one private local game, its reflection, Chronicle metadata, and moves."""
+    player = get_player(player_id)
+    if not player:
+        return None
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT local_games.*,
+                   reflections.intention AS reflection_intention,
+                   reflections.feeling AS reflection_feeling,
+                   reflections.note AS reflection_note,
+                   chronicles.id AS chronicle_id,
+                   chronicles.engine_name AS chronicle_engine_name,
+                   chronicles.engine_skill AS chronicle_engine_skill,
+                   chronicles.analysis_time AS chronicle_analysis_time,
+                   chronicles.updated_at AS chronicle_updated_at
+            FROM local_games
+            LEFT JOIN local_game_reflections AS reflections
+                ON reflections.game_id = local_games.id
+            LEFT JOIN local_chronicles AS chronicles
+                ON chronicles.game_id = local_games.id
+            WHERE local_games.id = ? AND local_games.player_id = ?
+            """,
+            (game_id, player_id),
+        ).fetchone()
+        if row is None:
+            return None
+        moves = conn.execute(
+            "SELECT * FROM local_moves WHERE game_id = ? ORDER BY ply, id",
+            (game_id,),
+        ).fetchall()
+    game = _decorate_game(row, player)
+    game["moves"] = [row_to_dict(move) for move in moves]
+    return game
+
+
+def save_game_reflection(
+    player_id: int,
+    game_id: int,
+    *,
+    intention: Optional[str] = None,
+    feeling: Optional[str] = None,
+    note: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    """Upsert player-authored reflection data for an owned local game."""
+    values = {
+        "intention": (intention or "").strip()[:80] or None,
+        "feeling": (feeling or "").strip()[:40] or None,
+        "note": (note or "").strip()[:500] or None,
+    }
+    now = _now()
+    with get_connection() as conn:
+        if conn.execute(
+            "SELECT 1 FROM local_games WHERE id = ? AND player_id = ?",
+            (game_id, player_id),
+        ).fetchone() is None:
+            return None
+        conn.execute(
+            """
+            INSERT INTO local_game_reflections (game_id, intention, feeling, note, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(game_id) DO UPDATE SET
+                intention = excluded.intention,
+                feeling = excluded.feeling,
+                note = excluded.note,
+                updated_at = excluded.updated_at
+            """,
+            (game_id, values["intention"], values["feeling"], values["note"], now, now),
+        )
+        conn.execute(
+            "UPDATE local_games SET intention = ?, updated_at = ? WHERE id = ?",
+            (values["intention"], now, game_id),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM local_game_reflections WHERE game_id = ?",
+            (game_id,),
+        ).fetchone()
+    return row_to_dict(row)
+
+
+def save_local_chronicle(
+    player_id: int,
+    game_id: int,
+    report: dict[str, Any],
+    *,
+    engine_name: str = "Stockfish",
+    engine_skill: int = 5,
+    analysis_time: float = 0.25,
+) -> Optional[dict[str, Any]]:
+    """Persist one private engine-backed Chronicle for an owned local game."""
+    encoded = json.dumps(report, ensure_ascii=True, separators=(",", ":"))
+    now = _now()
+    with get_connection() as conn:
+        if conn.execute(
+            "SELECT 1 FROM local_games WHERE id = ? AND player_id = ?",
+            (game_id, player_id),
+        ).fetchone() is None:
+            return None
+        conn.execute(
+            """
+            INSERT INTO local_chronicles
+                (game_id, engine_name, engine_skill, analysis_time, report_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(game_id) DO UPDATE SET
+                engine_name = excluded.engine_name,
+                engine_skill = excluded.engine_skill,
+                analysis_time = excluded.analysis_time,
+                report_json = excluded.report_json,
+                updated_at = excluded.updated_at
+            """,
+            (game_id, engine_name.strip()[:40] or "Stockfish", int(engine_skill), float(analysis_time), encoded, now, now),
+        )
+        conn.commit()
+        row = conn.execute(
+            """
+            SELECT id, game_id, engine_name, engine_skill, analysis_time, created_at, updated_at
+            FROM local_chronicles WHERE game_id = ?
+            """,
+            (game_id,),
+        ).fetchone()
+    return row_to_dict(row)
+
+
+def get_local_chronicle(player_id: int, game_id: int) -> Optional[dict[str, Any]]:
+    """Load a saved private Chronicle only when it belongs to the active player."""
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT chronicles.*
+            FROM local_chronicles AS chronicles
+            JOIN local_games ON local_games.id = chronicles.game_id
+            WHERE chronicles.game_id = ? AND local_games.player_id = ?
+            """,
+            (game_id, player_id),
+        ).fetchone()
+    if row is None:
+        return None
+    chronicle = row_to_dict(row)
+    try:
+        chronicle["report"] = json.loads(chronicle.pop("report_json"))
+    except (TypeError, json.JSONDecodeError):
+        chronicle["report"] = None
+    return chronicle
 
 
 def get_recent_puzzle_attempts(player_id: int, limit: int = 10) -> list[dict[str, Any]]:

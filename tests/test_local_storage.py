@@ -1,6 +1,15 @@
 import backend.app.database as database
 from backend.app.database import init_db
-from backend.app.local_storage import create_player, get_active_player, get_game_history, set_active_player
+from backend.app.local_storage import (
+    create_player,
+    get_active_player,
+    get_game_history,
+    get_local_chronicle,
+    get_local_game_record,
+    save_game_reflection,
+    save_local_chronicle,
+    set_active_player,
+)
 from backend.app.main import (
     HTTPException,
     LocalGameCreate,
@@ -63,10 +72,31 @@ def test_local_profiles_and_event_stats_are_separate(tmp_path, monkeypatch):
         LocalGameFinish(
             result="1-0",
             result_reason="checkmate",
-            pgn="1. e4 1-0",
+            pgn="1. e4",
             final_fen="final",
         ),
     )
+    reflection = save_game_reflection(
+        first["id"],
+        game["id"],
+        intention="castle_early",
+        feeling="learning",
+        note="I kept looking for a safe developing move.",
+    )
+    assert reflection["feeling"] == "learning"
+    record = get_local_game_record(first["id"], game["id"])
+    assert record["moves"][0]["fen_before"].split()[1] == "w"
+    assert record["reflection_intention"] == "castle_early"
+    saved_meta = save_local_chronicle(
+        first["id"],
+        game["id"],
+        {"summary": {"verdict": "A useful test Chronicle"}},
+        engine_skill=5,
+        analysis_time=0.25,
+    )
+    assert saved_meta["engine_name"] == "Stockfish"
+    chronicle = get_local_chronicle(first["id"], game["id"])
+    assert chronicle["report"]["summary"]["verdict"] == "A useful test Chronicle"
     save_local_puzzle_attempt(
         LocalPuzzleAttemptCreate(
             puzzle_id="mate_001",
@@ -89,6 +119,8 @@ def test_local_profiles_and_event_stats_are_separate(tmp_path, monkeypatch):
     history = get_game_history(first["id"])
     assert history[0]["pgn"] == "1. e4 1-0"
     assert history[0]["player_result"] == "win"
+    assert history[0]["chronicle_updated_at"]
+    assert history[0]["reflection_feeling"] == "learning"
     assert local_game_history(50)["games"][0]["pgn"] == "1. e4 1-0"
 
     set_active_player(second["id"])

@@ -72,12 +72,22 @@ when the FastAPI app starts. It includes:
 - puzzles
 - user_puzzle_attempts
 - memes
+- local_games and local_moves for private local match records
+- local_game_reflections for player-authored intentions and post-game notes
+- local_chronicles for private Stockfish-backed Match Chronicles
 
 ## Notes
 
-The Play page already renders the board, timers, move history, captured pieces,
-chat/meme panel, and core action buttons. Bot Battle and Puzzle pages are
-scaffolded for later, as requested.
+The Play page records move FENs, SAN/UCI moves, clock time, captures, and finish
+reasons. Completed local games can be given a player intention and reflection,
+then opened as a private Match Chronicle from Profile or the finished-game
+panel. Chronicles include engine metadata, evaluation timelines, pressure data,
+and an interactive Try the Moment board. Imported PGNs remain available for
+one-off analysis without being saved to local history.
+
+The current Chronicle loop is intentionally local-first. Online matchmaking,
+friend rooms, public sharing, ratings, and permanent account synchronization
+remain later stages after the private game lifecycle is dependable.
 
 ## ML Foundation
 

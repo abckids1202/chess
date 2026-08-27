@@ -127,6 +127,8 @@ CREATE TABLE IF NOT EXISTS local_games (
     opponent_type TEXT NOT NULL DEFAULT 'human',
     opponent_name TEXT,
     player_color TEXT,
+    time_control TEXT NOT NULL DEFAULT '10+0',
+    intention TEXT,
     result TEXT NOT NULL DEFAULT '*',
     result_reason TEXT,
     pgn TEXT,
@@ -151,6 +153,29 @@ CREATE TABLE IF NOT EXISTS local_moves (
     fen_after TEXT NOT NULL,
     moved_at TEXT,
     time_left INTEGER,
+    FOREIGN KEY (game_id) REFERENCES local_games(id)
+);
+
+CREATE TABLE IF NOT EXISTS local_game_reflections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    game_id INTEGER NOT NULL UNIQUE,
+    intention TEXT,
+    feeling TEXT,
+    note TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (game_id) REFERENCES local_games(id)
+);
+
+CREATE TABLE IF NOT EXISTS local_chronicles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    game_id INTEGER NOT NULL UNIQUE,
+    engine_name TEXT NOT NULL DEFAULT 'Stockfish',
+    engine_skill INTEGER NOT NULL DEFAULT 5,
+    analysis_time REAL NOT NULL DEFAULT 0.25,
+    report_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (game_id) REFERENCES local_games(id)
 );
 
@@ -218,6 +243,8 @@ def _ensure_local_columns(conn):
             "opponent_type": "TEXT NOT NULL DEFAULT 'human'",
             "opponent_name": "TEXT",
             "player_color": "TEXT",
+            "time_control": "TEXT NOT NULL DEFAULT '10+0'",
+            "intention": "TEXT",
             "result_reason": "TEXT",
             "starting_fen": "TEXT",
             "total_moves": "INTEGER NOT NULL DEFAULT 0",
@@ -270,6 +297,8 @@ def _ensure_local_columns(conn):
 
     conn.execute("CREATE INDEX IF NOT EXISTS idx_local_games_player_id ON local_games(player_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_local_moves_game_id ON local_moves(game_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_local_chronicles_game_id ON local_chronicles(game_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_local_reflections_game_id ON local_game_reflections(game_id)")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_local_puzzle_attempts_player_id ON local_puzzle_attempts(player_id)"
     )

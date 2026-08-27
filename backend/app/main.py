@@ -15,16 +15,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from .analysis.analysis_service import analyze_pgn
+from .analysis.engine_score import is_forced_mate
+from .analysis.move_classifier import classify_move, evaluation_loss, move_commentary
 from .analysis.stockfish_analyzer import StockfishAnalyzer
 from .database import get_connection, init_db, row_to_dict
 from .local_storage import (
     create_player,
+    get_local_chronicle,
+    get_local_game_record,
     get_game_history,
     get_active_player,
     get_all_players,
     get_local_leaderboard,
     get_all_settings,
     get_player_stats,
+    save_game_reflection,
+    save_local_chronicle,
     set_setting,
     set_active_player,
     update_player,
@@ -163,10 +169,18 @@ class StockfishMoveCreate(BaseModel):
 
 
 class AnalysisCreate(BaseModel):
-    pgn: str
+    game_id: Optional[int] = None
+    pgn: Optional[str] = None
     skill_level: int = 5
     analysis_time: float = 0.25
     max_plies: int = 120
+
+
+class TryMomentCreate(BaseModel):
+    fen: str
+    move_uci: str
+    skill_level: int = 5
+    analysis_time: float = 0.25
 
 
 class PuzzleValidationCreate(BaseModel):
@@ -191,6 +205,8 @@ class LocalGameCreate(BaseModel):
     white_name: str = "Player"
     black_name: str = "Player"
     mode: str = "local"
+    time_control: str = "10+0"
+    intention: Optional[str] = None
 
 
 class LocalMoveCreate(BaseModel):
@@ -206,6 +222,16 @@ class LocalGameFinish(BaseModel):
     result_reason: str = "manual"
     pgn: Optional[str] = None
     final_fen: Optional[str] = None
+
+
+class LocalGameUpdate(BaseModel):
+    intention: Optional[str] = None
+
+
+class LocalReflectionCreate(BaseModel):
+    intention: Optional[str] = None
+    feeling: Optional[str] = None
+    note: Optional[str] = None
 
 
 class LocalPuzzleAttemptCreate(BaseModel):
@@ -302,27 +328,149 @@ def stockfish_move(payload: StockfishMoveCreate):
 
 @app.post("/api/analysis")
 def analyze_game(payload: AnalysisCreate):
-    if not payload.pgn.strip():
-        raise HTTPException(status_code=400, detail="Please paste a PGN before analyzing the game.")
     if not 0 <= payload.skill_level <= 20:
         raise HTTPException(status_code=400, detail="skill_level must be between 0 and 20")
     if not 0.05 <= payload.analysis_time <= 5:
         raise HTTPException(status_code=400, detail="analysis_time must be between 0.05 and 5 seconds")
     if not 1 <= payload.max_plies <= 240:
         raise HTTPException(status_code=400, detail="max_plies must be between 1 and 240")
+
+    active_player = get_active_player()
+    game_record = None
+    source = "pgn"
+    if payload.game_id is not None:
+        game_record = get_local_game_record(active_player["id"], payload.game_id)
+        if not game_record:
+            raise HTTPException(status_code=404, detail="Saved local game not found")
+        pgn_text = (game_record.get("pgn") or "").strip()
+        source = "saved_game"
+    else:
+        pgn_text = (payload.pgn or "").strip()
+    if not pgn_text:
+        raise HTTPException(status_code=400, detail="Please choose a saved game or paste a PGN before analyzing.")
+
     try:
         engine = get_stockfish(payload.skill_level)
         analyzer = StockfishAnalyzer(
             analysis_time=payload.analysis_time,
             engine=engine,
         )
-        return analyze_pgn(payload.pgn, analyzer, max_plies=payload.max_plies)
+        report = analyze_pgn(pgn_text, analyzer, max_plies=payload.max_plies)
+        report["engine"] = {
+            "name": "Stockfish",
+            "skill_level": payload.skill_level,
+            "analysis_time": payload.analysis_time,
+        }
+        report["game_info"]["source"] = source
+        if game_record:
+            report["game_info"]["game_id"] = game_record["id"]
+            time_by_ply = {
+                move["ply"]: move.get("time_left")
+                for move in game_record.get("moves", [])
+            }
+            for move in report["moves"]:
+                move["time_left"] = time_by_ply.get(move["ply"])
+            for point in report["evaluation_timeline"]:
+                point["time_left"] = time_by_ply.get(point["ply"])
+            report["reflection"] = {
+                "intention": game_record.get("reflection_intention") or game_record.get("intention"),
+                "feeling": game_record.get("reflection_feeling"),
+                "note": game_record.get("reflection_note"),
+            }
+        else:
+            report["reflection"] = {"intention": None, "feeling": None, "note": None}
+
+        report["pressure_moments"] = [
+            move for move in report["moves"]
+            if move.get("time_left") is not None and move["time_left"] <= 30
+        ][:5]
+        report["chronicle_saved"] = bool(game_record)
+        if game_record:
+            save_local_chronicle(
+                active_player["id"],
+                game_record["id"],
+                report,
+                engine_name="Stockfish",
+                engine_skill=payload.skill_level,
+                analysis_time=payload.analysis_time,
+            )
+        return report
     except HTTPException:
         raise
     except FileNotFoundError as exc:
         raise HTTPException(status_code=503, detail=f"Stockfish path is unavailable. {exc}") from exc
     except chess.engine.EngineError as exc:
         raise HTTPException(status_code=503, detail="Stockfish stopped while analyzing this game.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/api/analysis/try-moment")
+def try_analysis_moment(payload: TryMomentCreate):
+    if not 0 <= payload.skill_level <= 20:
+        raise HTTPException(status_code=400, detail="skill_level must be between 0 and 20")
+    if not 0.05 <= payload.analysis_time <= 5:
+        raise HTTPException(status_code=400, detail="analysis_time must be between 0.05 and 5 seconds")
+    try:
+        board = chess.Board(payload.fen)
+        played_move = chess.Move.from_uci(payload.move_uci)
+        if played_move not in board.legal_moves:
+            raise ValueError("The selected move is not legal in this position.")
+        played_san = board.san(played_move)
+        engine = get_stockfish(payload.skill_level)
+        analyzer = StockfishAnalyzer(analysis_time=payload.analysis_time, engine=engine)
+        before_result = analyzer.analyze_position(board)
+        best_move = before_result["best_move"]
+        if best_move is None:
+            raise RuntimeError("Stockfish returned no best move for this position.")
+
+        best_san = board.san(best_move)
+        best_board = board.copy(stack=False)
+        best_board.push(best_move)
+        best_after = analyzer.analyze_position(best_board)
+        played_board = board.copy(stack=False)
+        played_board.push(played_move)
+        played_after = analyzer.analyze_position(played_board)
+        before_score = before_result["score"]
+        best_after_score = best_after["score"]
+        after_score = played_after["score"]
+        color = "white" if board.turn == chess.WHITE else "black"
+        loss = evaluation_loss(color, best_after_score["numeric"], after_score["numeric"])
+        classification = classify_move(
+            loss,
+            best_is_mate=is_forced_mate(best_after_score),
+            played_is_opponent_mate=is_forced_mate(after_score) and (
+                (color == "white" and after_score["numeric"] <= -100.0)
+                or (color == "black" and after_score["numeric"] >= 100.0)
+            ),
+            is_best_move=played_move == best_move,
+        )
+        return {
+            "played_move_uci": played_move.uci(),
+            "played_move_san": played_san,
+            "best_move_uci": best_move.uci(),
+            "best_move_san": best_san,
+            "eval_before": before_score["numeric"],
+            "eval_after": after_score["numeric"],
+            "eval_before_display": before_score["display"],
+            "eval_after_display": after_score["display"],
+            "best_after_score": best_after_score,
+            "eval_loss": loss,
+            "classification": classification,
+            "commentary": move_commentary(classification, loss, best_san),
+            "fen_after": played_board.fen(),
+            "engine": {
+                "name": "Stockfish",
+                "skill_level": payload.skill_level,
+                "analysis_time": payload.analysis_time,
+            },
+        }
+    except HTTPException:
+        raise
+    except chess.engine.EngineError as exc:
+        raise HTTPException(status_code=503, detail="Stockfish stopped while comparing this moment.") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
@@ -395,6 +543,8 @@ def create_local_game(payload: LocalGameCreate):
     active = get_active_player()
     white_name = payload.white_name.strip() or "Player"
     black_name = payload.black_name.strip() or "Opponent"
+    time_control = payload.time_control.strip()[:24] or "10+0"
+    intention = (payload.intention or "").strip()[:80] or None
     if white_name == active["username"]:
         player_color = "white"
         opponent_name = black_name
@@ -412,13 +562,15 @@ def create_local_game(payload: LocalGameCreate):
             """
             INSERT INTO local_games
                 (player_id, white_name, black_name, mode, opponent_type,
-                 opponent_name, player_color, starting_fen, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 opponent_name, player_color, time_control, intention,
+                 starting_fen, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 active["id"], white_name, black_name,
                 "local_1v1" if payload.mode == "local" else payload.mode,
-                opponent_type, opponent_name, player_color, chess.Board().fen(),
+                opponent_type, opponent_name, player_color, time_control, intention,
+                chess.Board().fen(),
                 datetime.now().astimezone().isoformat(timespec="seconds"),
             ),
         )
@@ -432,6 +584,47 @@ def local_game_history(limit: int = 50):
     if not 1 <= limit <= 100:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 100")
     return {"games": get_game_history(get_active_player()["id"], limit)}
+
+
+@app.get("/api/local/games/{game_id}/chronicle")
+def local_game_chronicle(game_id: int):
+    chronicle = get_local_chronicle(get_active_player()["id"], game_id)
+    if chronicle is None:
+        raise HTTPException(status_code=404, detail="Chronicle not found")
+    return chronicle
+
+
+@app.patch("/api/local/games/{game_id}")
+def update_local_game(game_id: int, payload: LocalGameUpdate):
+    intention = (payload.intention or "").strip()[:80] or None
+    with get_connection() as conn:
+        cur = conn.execute(
+            """
+            UPDATE local_games
+            SET intention = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND player_id = ?
+            """,
+            (intention, game_id, get_active_player()["id"]),
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Local game not found")
+        conn.commit()
+        row = conn.execute("SELECT * FROM local_games WHERE id = ?", (game_id,)).fetchone()
+    return row_to_dict(row)
+
+
+@app.post("/api/local/games/{game_id}/reflection")
+def create_local_game_reflection(game_id: int, payload: LocalReflectionCreate):
+    reflection = save_game_reflection(
+        get_active_player()["id"],
+        game_id,
+        intention=payload.intention,
+        feeling=payload.feeling,
+        note=payload.note,
+    )
+    if reflection is None:
+        raise HTTPException(status_code=404, detail="Local game not found")
+    return reflection
 
 
 @app.post("/api/local/games/{game_id}/moves")
@@ -507,6 +700,9 @@ def delete_last_local_move(game_id: int):
 def finish_local_game(game_id: int, payload: LocalGameFinish):
     if payload.result not in {"1-0", "0-1", "1/2-1/2", "*"}:
         raise HTTPException(status_code=400, detail="Invalid game result")
+    pgn = (payload.pgn or "").strip()
+    if payload.result != "*" and not pgn.endswith(payload.result):
+        pgn = f"{pgn} {payload.result}".strip()
     with get_connection() as conn:
         cur = conn.execute(
             """
@@ -516,7 +712,7 @@ def finish_local_game(game_id: int, payload: LocalGameFinish):
                 updated_at = CURRENT_TIMESTAMP, ended_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
-            (payload.result, payload.result_reason, payload.pgn, payload.final_fen, game_id, game_id),
+            (payload.result, payload.result_reason, pgn or None, payload.final_fen, game_id, game_id),
         )
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="Local game not found")
