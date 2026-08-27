@@ -211,6 +211,7 @@ function PlayPage({ botConfig }) {
   const [timeLeft, setTimeLeft] = useState({ w: INITIAL_CLOCK, b: INITIAL_CLOCK });
   const [gameOver, setGameOver] = useState("");
   const [socketStatus, setSocketStatus] = useState("offline");
+  const [flipOffset, setFlipOffset] = useState(false);
   const [chat, setChat] = useState([
     { from: "system", text: "Welcome to CHESS V2." },
     { from: "meme", text: "Capture memes will live here." }
@@ -239,6 +240,7 @@ function PlayPage({ botConfig }) {
   const turn = gameRef.current.turn() === "w" ? "WHITE" : "BLACK";
   const moveHistory = gameRef.current.history();
   const botToMove = botConfig && gameRef.current.turn() === botConfig.color;
+  const boardFlipped = botConfig ? flipOffset : (turn === "BLACK") !== flipOffset;
   const legalTargetSet = new Set(legalTargets.map((move) => move.to));
 
   function createLocalGame() {
@@ -524,6 +526,7 @@ function PlayPage({ botConfig }) {
     setSelected(null);
     setLegalTargets([]);
     setPremove(null);
+    setFlipOffset(false);
     setCaptured({ w: [], b: [] });
     setTimeLeft({ w: INITIAL_CLOCK, b: INITIAL_CLOCK });
     setGameOver("");
@@ -561,6 +564,7 @@ function PlayPage({ botConfig }) {
         <div className="turn-line">{turn} TO MOVE</div>
         <ChessBoard
           board={board}
+          flipped={boardFlipped}
           selected={selected}
           premove={premove}
           legalTargets={legalTargetSet}
@@ -586,6 +590,7 @@ function PlayPage({ botConfig }) {
           <button onClick={() => { setGameOver("Draw agreed"); finishLocalGame("1/2-1/2"); }}>Draw</button>
           <button onClick={undoMove}>Undo</button>
           <button onClick={resetGame}>Reset</button>
+          <button onClick={() => setFlipOffset((value) => !value)}>Flip</button>
         </div>
         <ChatPanel chat={chat} />
       </aside>
@@ -593,11 +598,14 @@ function PlayPage({ botConfig }) {
   );
 }
 
-function ChessBoard({ board, selected, premove, legalTargets, onSquare, onClearSelection }) {
+function ChessBoard({ board, flipped = false, selected, premove, legalTargets, onSquare, onClearSelection }) {
   return (
     <div className="chess-board" onContextMenu={(event) => { event.preventDefault(); onClearSelection?.(); }}>
-      {board.flatMap((row, rowIndex) =>
-        row.map((piece, colIndex) => {
+      {Array.from({ length: 8 }).flatMap((_, displayRow) =>
+        Array.from({ length: 8 }).map((__, displayCol) => {
+          const rowIndex = flipped ? 7 - displayRow : displayRow;
+          const colIndex = flipped ? 7 - displayCol : displayCol;
+          const piece = board[rowIndex][colIndex];
           const square = "abcdefgh"[colIndex] + (8 - rowIndex);
           const isLight = (rowIndex + colIndex) % 2 === 0;
           const isSelected = selected === square;
@@ -1087,12 +1095,46 @@ function PuzzlePage() {
 
 function AnalysisPage() {
   const [pgn, setPgn] = useState("");
+  const [history, setHistory] = useState([]);
+  const [selectedGameId, setSelectedGameId] = useState("");
+  const [historyLoading, setHistoryLoading] = useState(true);
   const [skillLevel, setSkillLevel] = useState(5);
   const [analysis, setAnalysis] = useState(null);
   const [selectedPly, setSelectedPly] = useState(null);
   const [memeMode, setMemeMode] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch("/api/local/games/history?limit=50")
+      .then((data) => {
+        if (!cancelled) {
+          setHistory(data.games || []);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setHistory([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setHistoryLoading(false);
+        }
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  function chooseSavedGame(event) {
+    const gameId = event.target.value;
+    setSelectedGameId(gameId);
+    const game = history.find((item) => String(item.id) === gameId);
+    if (game?.pgn) {
+      setPgn(game.pgn);
+      setError("");
+    }
+  }
 
   async function analyzeGame(event) {
     event.preventDefault();
@@ -1137,10 +1179,23 @@ function AnalysisPage() {
             </select>
           </label>
         </div>
+        <label className="analysis-source-select">
+          Saved match
+          <select value={selectedGameId} onChange={chooseSavedGame}>
+            <option value="">Choose a completed game from match history</option>
+            {history.map((game) => (
+              <option value={game.id} key={game.id} disabled={!game.pgn}>
+                {game.player_result} vs {game.opponent_display || "Opponent"} · {game.total_moves || 0} moves{game.pgn ? "" : " · no PGN"}
+              </option>
+            ))}
+          </select>
+          {historyLoading && <span className="analysis-help">Loading saved matches...</span>}
+          {!historyLoading && !history.length && <span className="analysis-help">Completed matches will appear here.</span>}
+        </label>
         <textarea value={pgn} onChange={(event) => setPgn(event.target.value)} placeholder="Paste PGN here" />
         <div className="analysis-input-actions">
           <button className="primary-action" type="submit" disabled={analyzing}>{analyzing ? "Analyzing..." : "Analyze game"}</button>
-          <button type="button" onClick={() => { setPgn(""); setAnalysis(null); setError(""); }}>Clear PGN</button>
+          <button type="button" onClick={() => { setPgn(""); setSelectedGameId(""); setAnalysis(null); setError(""); }}>Clear PGN</button>
           {analyzing && <span className="analysis-progress">Stockfish is reading the position...</span>}
         </div>
         {error && <p className="form-error">{error}</p>}
@@ -1276,6 +1331,7 @@ function memeComment(move) {
 function ProfilePage({ localStats, onRefresh }) {
   const identity = localStats?.profile || { id: 1, username: "Player" };
   const [players, setPlayers] = useState([]);
+  const [history, setHistory] = useState([]);
   const [username, setUsername] = useState(identity.username || "");
   const [newUsername, setNewUsername] = useState("");
   const [message, setMessage] = useState("");
@@ -1289,12 +1345,22 @@ function ProfilePage({ localStats, onRefresh }) {
     }
   }
 
+  async function loadHistory() {
+    try {
+      const data = await apiFetch("/api/local/games/history?limit=50");
+      setHistory(data.games || []);
+    } catch (error) {
+      setMessage(error.message);
+    }
+  }
+
   useEffect(() => {
     setUsername(identity.username || "");
   }, [identity.id, identity.username]);
 
   useEffect(() => {
     loadPlayers();
+    loadHistory();
   }, [identity.id]);
 
   async function saveProfile(event) {
@@ -1347,7 +1413,7 @@ function ProfilePage({ localStats, onRefresh }) {
     }
   }
 
-  const games = localStats?.recent_games || [];
+  const games = history.length ? history : (localStats?.recent_games || []);
   const puzzles = localStats?.recent_puzzles || [];
   const percent = Math.round((localStats?.puzzle_accuracy || 0) * 100);
 
@@ -1423,12 +1489,12 @@ function ProfilePage({ localStats, onRefresh }) {
 
       <div className="profile-grid profile-detail-grid">
         <div className="profile-card profile-activity-card">
-          <h3>Recent games</h3>
+          <h3>Match history</h3>
           {games.length ? games.map((game) => (
             <div className="activity-row" key={game.id}>
               <strong className={`result-${game.player_result}`}>{game.player_result}</strong>
               <span>vs {game.opponent_display || "Opponent"} · {game.total_moves || 0} moves</span>
-              <small>{game.result_reason || game.mode || "game"} · {game.date || "recently"}</small>
+              <small>{game.result_reason || game.mode || "game"} · {game.date || "recently"}{game.pgn ? " · ready for analysis" : ""}</small>
             </div>
           )) : <p>No completed games yet.</p>}
         </div>

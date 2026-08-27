@@ -19,6 +19,7 @@ from .analysis.stockfish_analyzer import StockfishAnalyzer
 from .database import get_connection, init_db, row_to_dict
 from .local_storage import (
     create_player,
+    get_game_history,
     get_active_player,
     get_all_players,
     get_local_leaderboard,
@@ -424,6 +425,13 @@ def create_local_game(payload: LocalGameCreate):
         conn.commit()
         row = conn.execute("SELECT * FROM local_games WHERE id = ?", (cur.lastrowid,)).fetchone()
     return row_to_dict(row)
+
+
+@app.get("/api/local/games/history")
+def local_game_history(limit: int = 50):
+    if not 1 <= limit <= 100:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 100")
+    return {"games": get_game_history(get_active_player()["id"], limit)}
 
 
 @app.post("/api/local/games/{game_id}/moves")

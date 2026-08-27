@@ -1,6 +1,6 @@
 import backend.app.database as database
 from backend.app.database import init_db
-from backend.app.local_storage import create_player, get_active_player, set_active_player
+from backend.app.local_storage import create_player, get_active_player, get_game_history, set_active_player
 from backend.app.main import (
     HTTPException,
     LocalGameCreate,
@@ -10,6 +10,7 @@ from backend.app.main import (
     create_local_game,
     finish_local_game,
     delete_last_local_move,
+    local_game_history,
     local_stats,
     save_local_move,
     save_local_puzzle_attempt,
@@ -59,7 +60,12 @@ def test_local_profiles_and_event_stats_are_separate(tmp_path, monkeypatch):
     )
     finish_local_game(
         game["id"],
-        LocalGameFinish(result="1-0", result_reason="checkmate", final_fen="final"),
+        LocalGameFinish(
+            result="1-0",
+            result_reason="checkmate",
+            pgn="1. e4 1-0",
+            final_fen="final",
+        ),
     )
     save_local_puzzle_attempt(
         LocalPuzzleAttemptCreate(
@@ -80,6 +86,10 @@ def test_local_profiles_and_event_stats_are_separate(tmp_path, monkeypatch):
     assert stats["best_puzzle_rating_solved"] == 950
     assert stats["recent_games"][0]["result_reason"] == "checkmate"
     assert stats["recent_puzzles"][0]["themes"] == ["mateIn1"]
+    history = get_game_history(first["id"])
+    assert history[0]["pgn"] == "1. e4 1-0"
+    assert history[0]["player_result"] == "win"
+    assert local_game_history(50)["games"][0]["pgn"] == "1. e4 1-0"
 
     set_active_player(second["id"])
     other_stats = local_stats()

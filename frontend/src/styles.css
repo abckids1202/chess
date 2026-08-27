@@ -396,7 +396,7 @@ button {
 
 .action-row {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 8px;
   margin-top: 18px;
 }
@@ -637,6 +637,23 @@ button {
   border: 1px solid rgba(110, 80, 200, 0.75);
   border-radius: 8px;
   padding: 9px 10px;
+  background: rgba(12, 10, 30, 0.82);
+  color: var(--cream);
+}
+
+.analysis-source-select {
+  display: grid;
+  gap: 6px;
+  color: var(--dim);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.analysis-source-select select {
+  width: 100%;
+  border: 1px solid rgba(110, 80, 200, 0.75);
+  border-radius: 8px;
+  padding: 10px 12px;
   background: rgba(12, 10, 30, 0.82);
   color: var(--cream);
 }

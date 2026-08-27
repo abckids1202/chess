@@ -198,6 +198,25 @@ def get_recent_games(player_id: int, limit: int = 10) -> list[dict[str, Any]]:
     return [_decorate_game(row, player) for row in rows]
 
 
+def get_game_history(player_id: int, limit: int = 50) -> list[dict[str, Any]]:
+    """Return saved local matches for the history and analysis selectors."""
+    player = get_player(player_id)
+    if not player:
+        return []
+    safe_limit = max(1, min(100, int(limit)))
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM local_games
+            WHERE player_id = ?
+            ORDER BY COALESCE(ended_at, updated_at, created_at) DESC, id DESC
+            LIMIT ?
+            """,
+            (player_id, safe_limit),
+        ).fetchall()
+    return [_decorate_game(row, player) for row in rows]
+
+
 def get_recent_puzzle_attempts(player_id: int, limit: int = 10) -> list[dict[str, Any]]:
     with get_connection() as conn:
         rows = conn.execute(
