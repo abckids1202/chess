@@ -60,6 +60,43 @@ Open:
 http://localhost:5173
 ```
 
+## Vercel Frontend and Render Backend
+
+The repository includes a root `vercel.json` so Vercel can deploy the Vite
+frontend from this monorepo. In Vercel, use the repository root as the project
+root. The configuration builds `frontend` and publishes `frontend/dist`.
+
+Set these Vercel environment variables for Preview and Production:
+
+```text
+VITE_API_TARGET=https://your-chess-v2-backend.onrender.com
+VITE_GOOGLE_CLIENT_ID=your-google-client-id.apps.googleusercontent.com
+```
+
+For the FastAPI service on Render, use:
+
+```text
+Root Directory: backend
+Build Command: pip install -r requirements.txt
+Start Command: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+Health Check Path: /health
+```
+
+Set these Render environment variables:
+
+```text
+CHESS_V2_SECRET=<long-random-secret>
+CORS_ORIGINS=https://your-vercel-project.vercel.app
+GOOGLE_CLIENT_ID=your-google-client-id.apps.googleusercontent.com
+STOCKFISH_PATH=<path to a Linux Stockfish binary, when analysis is enabled>
+```
+
+`render.yaml` contains the backend service definition. SQLite is suitable for
+local development, but Render's filesystem is not a permanent database, so a
+managed PostgreSQL database should be added before production accounts and
+history are introduced. Stockfish also needs a Linux executable on Render;
+the Windows path in local development will not work there.
+
 ## Database Tables
 
 The SQLite database is created automatically at `backend/data/chess_v2.sqlite3`

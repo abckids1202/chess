@@ -4,10 +4,10 @@ import { Chess } from "chess.js";
 import { BOT_DEFINITIONS, BOT_LEVELS, BOT_PERSONALITIES, STOCKFISH_LEVELS } from "./bots";
 import { get_legal_moves, make_move } from "./chessEngine";
 import { PuzzleManager, loadPuzzles } from "./puzzleManager";
+import { BackToTop, CommandPalette, HomePage, ScrollProgress, TopNav } from "./homeComponents";
 import "./styles.css";
 
-const tabs = ["Home", "Play", "Bot Battle", "Puzzle", "Analysis", "Profile", "Leaderboard"];
-const API_TARGET = import.meta.env.VITE_API_TARGET || "";
+const API_TARGET = (import.meta.env.VITE_API_TARGET || "").replace(/\/$/, "");
 
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
 const pieceCodes = { p: "P", n: "N", b: "B", r: "R", q: "Q", k: "K" };
@@ -79,6 +79,7 @@ function App() {
   const [botConfig, setBotConfig] = useState(null);
   const [localStats, setLocalStats] = useState(null);
   const [analysisGameId, setAnalysisGameId] = useState("");
+  const [commandOpen, setCommandOpen] = useState(false);
 
   function refreshLocalStats() {
     return apiFetch("/api/local/stats").then(setLocalStats).catch(() => null);
@@ -103,6 +104,23 @@ function App() {
     refreshLocalStats();
   }, []);
 
+  useEffect(() => {
+    const handleShortcuts = (event) => {
+      const target = event.target;
+      const isTyping = target instanceof HTMLElement &&
+        ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setCommandOpen(true);
+      } else if (event.key === "/" && !isTyping) {
+        event.preventDefault();
+        setCommandOpen(true);
+      }
+    };
+    window.addEventListener("keydown", handleShortcuts);
+    return () => window.removeEventListener("keydown", handleShortcuts);
+  }, []);
+
   function handleAuth(data) {
     localStorage.setItem("chess_v2_token", data.token);
     setToken(data.token);
@@ -121,41 +139,52 @@ function App() {
     setPage("Analysis");
   }
 
+  function navigateToPage(nextPage) {
+    if (nextPage === "Play") {
+      setBotConfig(null);
+    }
+    setPage(nextPage);
+  }
+
   return (
     <main className="app-shell">
       <Starfield />
-      <nav className="top-nav">
-        <button className="brand" onClick={() => setPage("Home")}>CHESS V2</button>
-        <div className="nav-tabs">
-          {tabs.map((tab) => (
-            <button
-              key={tab}
-              className={page === tab ? "active" : ""}
-              onClick={() => setPage(tab)}
-            >
-              {tab}
-            </button>
-          ))}
-        </div>
-        <button className="login-button" onClick={() => setPage("Profile")}>
-          {localStats?.profile?.username || "Profile"}
-        </button>
-      </nav>
+      <ScrollProgress />
+      <TopNav
+        page={page}
+        onNavigate={navigateToPage}
+        username={localStats?.profile?.username || "Profile"}
+        onOpenCommand={() => setCommandOpen(true)}
+      />
 
-      {page === "Home" && <HomePage onPlay={() => { setBotConfig(null); setPage("Play"); }} onProfile={() => setPage("Profile")} />}
-      {page === "Play" && <PlayPage botConfig={botConfig} onOpenAnalysis={openAnalysis} />}
-      {page === "Bot Battle" && <BotBattlePage onStart={(config) => { setBotConfig(config); setPage("Play"); }} />}
-      {page === "Puzzle" && <PuzzlePage />}
-      {page === "Analysis" && <AnalysisPage initialGameId={analysisGameId} />}
-      {page === "Profile" && (
-        <ProfilePage
-          localStats={localStats}
-          onRefresh={refreshLocalStats}
-          onOpenAnalysis={openAnalysis}
-        />
-      )}
-      {page === "Leaderboard" && <LeaderboardPage localStats={localStats} />}
+      <div className="page-stage" key={page}>
+        {page === "Home" && (
+          <HomePage
+            apiFetch={apiFetch}
+            localStats={localStats}
+            onRefreshStats={refreshLocalStats}
+            onPlay={() => navigateToPage("Play")}
+            onProfile={() => navigateToPage("Profile")}
+            onNavigate={navigateToPage}
+            onOpenAnalysis={openAnalysis}
+          />
+        )}
+        {page === "Play" && <PlayPage botConfig={botConfig} onOpenAnalysis={openAnalysis} />}
+        {page === "Bot Battle" && <BotBattlePage onStart={(config) => { setBotConfig(config); setPage("Play"); }} />}
+        {page === "Puzzle" && <PuzzlePage />}
+        {page === "Analysis" && <AnalysisPage initialGameId={analysisGameId} />}
+        {page === "Profile" && (
+          <ProfilePage
+            localStats={localStats}
+            onRefresh={refreshLocalStats}
+            onOpenAnalysis={openAnalysis}
+          />
+        )}
+        {page === "Leaderboard" && <LeaderboardPage localStats={localStats} />}
+      </div>
       {authOpen && <AuthModal onClose={() => setAuthOpen(false)} onAuth={handleAuth} />}
+      <CommandPalette open={commandOpen} onClose={() => setCommandOpen(false)} onNavigate={navigateToPage} />
+      <BackToTop />
     </main>
   );
 }
@@ -173,48 +202,6 @@ function Starfield() {
           }}
         />
       ))}
-    </div>
-  );
-}
-
-function HomePage({ onPlay, onProfile }) {
-  return (
-    <section className="page home-layout">
-      <div className="hero-copy">
-        <p className="eyebrow">cosmic chess, now on the web</p>
-        <h1>CHESS V2</h1>
-        <p>
-          yo
-        </p>
-        <div className="hero-actions">
-          <button className="primary-action" onClick={onPlay}>Play</button>
-          <button className="secondary-action" onClick={onProfile}>Local profile</button>
-        </div>
-      </div>
-      <ThemePreview />
-      <div className="feature-grid">
-        {["Realtime play", "Meme mode", "Chess clocks", "PGN analysis"].map((item) => (
-          <article className="feature-card" key={item}>
-            <h3>{item}</h3>
-            <p>yo</p>
-          </article>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function ThemePreview() {
-  return (
-    <div className="theme-preview">
-      <div className="mini-board">
-        {Array.from({ length: 64 }).map((_, i) => (
-          <div className={(Math.floor(i / 8) + i) % 2 === 0 ? "light" : "dark"} key={i} />
-        ))}
-      </div>
-      <div className="preview-panel">
-        <strong>Theme preview</strong>
-      </div>
     </div>
   );
 }

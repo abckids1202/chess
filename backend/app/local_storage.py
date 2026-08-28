@@ -409,6 +409,15 @@ def get_player_stats(player_id: int) -> dict[str, Any]:
         attempts = [row_to_dict(row) for row in conn.execute(
             "SELECT * FROM local_puzzle_attempts WHERE player_id = ?", (player_id,)
         ).fetchall()]
+        chronicles_created = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM local_chronicles
+            JOIN local_games ON local_games.id = local_chronicles.game_id
+            WHERE local_games.player_id = ?
+            """,
+            (player_id,),
+        ).fetchone()["count"]
 
     completed = [game for game in games if (game.get("result") or "*") != "*"]
     results = [_game_result(game, player) for game in completed]
@@ -445,6 +454,7 @@ def get_player_stats(player_id: int) -> dict[str, Any]:
         "best_bot_beaten": best_bot,
         "puzzle_attempts": attempts_count,
         "puzzles_solved": solved,
+        "chronicles_created": chronicles_created,
         "puzzle_accuracy": round(solved / attempts_count, 3) if attempts_count else 0,
         "average_puzzle_attempts": round(
             sum(max(1, int(attempt.get("attempts") or 1)) for attempt in attempts) / attempts_count, 2

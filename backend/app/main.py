@@ -39,16 +39,24 @@ from .puzzle_validation import validate_puzzle
 from .stockfish_bot import StockfishBot
 
 
+_default_cors_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
+]
+_configured_cors_origins = os.getenv("CORS_ORIGINS", "")
+cors_origins = _default_cors_origins + [
+    origin.strip().rstrip("/")
+    for origin in _configured_cors_origins.split(",")
+    if origin.strip()
+]
+
 app = FastAPI(title="Chess V2 API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:5174",
-        "http://127.0.0.1:5174",
-    ],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
