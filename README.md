@@ -1,7 +1,12 @@
 # Chess V2 Web
 
-This folder now contains the first web-app version of Chess V2 while keeping
-the original `chess_game.py` Pygame file as a reference.
+CHESS V2 is a dark-fantasy chess game and learning platform where chess
+concepts are taught as trials, analysis becomes a post-battle autopsy, puzzles
+become training encounters, and bots will eventually become characters with
+distinct personalities.
+
+This folder contains the web-app version of CHESS V2 while keeping the
+original `chess_game.py` Pygame file as a reference.
 
 ## Stack
 
@@ -23,7 +28,7 @@ backend/
 frontend/
   src/
     main.jsx       React pages and chess screen
-    styles.css     Cosmic CHESS V2 styling
+    styles.css     Dark-fantasy CHESS V2 styling
   package.json
   vite.config.js
 

@@ -847,7 +847,7 @@ function AuthModal({ onClose, onAuth }) {
     email: "",
     password: "",
     display_name: "",
-    favorite_theme: "Royal cosmic"
+    favorite_theme: "Dark fantasy"
   });
 
   useEffect(() => {

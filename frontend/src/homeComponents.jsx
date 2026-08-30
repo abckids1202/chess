@@ -186,10 +186,10 @@ export function HomePage({
     <section className="page home-page" aria-labelledby="home-title">
       <div className="home-hero">
         <div className="hero-copy">
-          <p className="eyebrow">cosmic chess, now on the web</p>
+          <p className="eyebrow">dark-fantasy chess, now on the web</p>
           <h1 id="home-title">CHESS V2</h1>
           <p className="home-lede">
-            Play a game, remember the turning point, and come back to try it another way.
+            Enter a trial, survive the turning point, and return to the battle to try it another way.
           </p>
           <div className="hero-actions">
             <button className="primary-action" type="button" onClick={onPlay}>
@@ -200,7 +200,7 @@ export function HomePage({
             </button>
           </div>
           <p className="hero-note">
-            {username ? `Welcome back, ${username}. Your local chess shelf is ready.` : "Your games and reflections stay on this device."}
+            {username ? `Welcome back, ${username}. Your private battle shelf is ready.` : "Your battles and reflections stay private on this device."}
           </p>
         </div>
         <ThemePreview />
@@ -393,7 +393,7 @@ export function ThemePreview() {
       </div>
       <div className="preview-panel">
         <strong>Theme preview</strong>
-        <span>Real pieces. Cosmic board. Your next game starts here.</span>
+        <span>Real pieces. Dark-fantasy board. Your next trial starts here.</span>
       </div>
     </aside>
   );
