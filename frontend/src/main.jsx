@@ -8,7 +8,6 @@ import {
   loadPuzzles,
   puzzleDisplayExplanation,
   puzzleDisplayTitle,
-  puzzleThemeLabel,
   puzzleThemeLabels
 } from "./puzzleManager";
 import { BackToTop, CommandPalette, HomePage, ScrollProgress, TopNav } from "./homeComponents";
@@ -1049,15 +1048,7 @@ function PuzzlePage() {
   const [showHint, setShowHint] = useState(false);
   const [complete, setComplete] = useState(false);
   const [successMessage, setSuccessMessage] = useState("");
-  const [activeCategory, setActiveCategory] = useState("all");
-  const [visiblePuzzleCount, setVisiblePuzzleCount] = useState(12);
   const legalTargetSet = new Set(legalTargets.map((move) => move.to));
-  const categories = [...new Set(puzzles.flatMap((puzzle) => puzzle.themes || []))]
-    .sort((left, right) => puzzleThemeLabel(left).localeCompare(puzzleThemeLabel(right)));
-  const filteredPuzzles = activeCategory === "all"
-    ? puzzles
-    : puzzles.filter((puzzle) => (puzzle.themes || []).includes(activeCategory));
-  const visiblePuzzles = filteredPuzzles.slice(0, visiblePuzzleCount);
   const currentPuzzleIndex = puzzles.findIndex((puzzle) => puzzle.id === currentPuzzle?.id);
 
   useEffect(() => {
@@ -1116,10 +1107,8 @@ function PuzzlePage() {
       if (!puzzles.length || !currentPuzzle) {
         return;
       }
-      const sequence = filteredPuzzles.length ? filteredPuzzles : puzzles;
-      const sequenceIndex = sequence.findIndex((puzzle) => puzzle.id === currentPuzzle.id);
-      const nextIndex = (sequenceIndex + 1 + sequence.length) % sequence.length;
-      startPuzzle(sequence[nextIndex].id, puzzles);
+      const nextIndex = (currentPuzzleIndex + 1 + puzzles.length) % puzzles.length;
+      startPuzzle(puzzles[nextIndex].id, puzzles);
     }, 950);
   }
 
@@ -1205,9 +1194,8 @@ function PuzzlePage() {
     if (!puzzles.length || !currentPuzzle) {
       return;
     }
-    const sequence = filteredPuzzles.length ? filteredPuzzles : puzzles;
-    const currentIndex = sequence.findIndex((puzzle) => puzzle.id === currentPuzzle.id);
-    const next = sequence[(currentIndex + 1 + sequence.length) % sequence.length];
+    const currentIndex = puzzles.findIndex((puzzle) => puzzle.id === currentPuzzle.id);
+    const next = puzzles[(currentIndex + 1 + puzzles.length) % puzzles.length];
     startPuzzle(next.id, puzzles);
   }
 
@@ -1227,15 +1215,6 @@ function PuzzlePage() {
         <aside className="game-panel puzzle-panel">
           <div className="puzzle-heading-row">
             <h2>{currentPuzzle ? puzzleDisplayTitle(currentPuzzle, currentPuzzleIndex) : "Validated trials"}</h2>
-            <span className="puzzle-count">{puzzles.length} encounters</span>
-          </div>
-          <div className="puzzle-meta">
-            <span>Rating {currentPuzzle?.rating || "-"}</span>
-            <span>{currentPuzzle ? new Chess(currentPuzzle.solver_fen).turn() === "w" ? "white to move" : "black to move" : "-"}</span>
-            <span>Attempts {attempts}</span>
-          </div>
-          <div className="tag-row">
-            {puzzleThemeLabels(currentPuzzle).map((tag) => <span key={tag}>{tag}</span>)}
           </div>
           <p className={complete ? "feedback-good" : "feedback-line"}>{feedback}</p>
           {showHint && <p className="hint-box">{currentPuzzle?.hint}</p>}
@@ -1244,64 +1223,6 @@ function PuzzlePage() {
             <button onClick={() => setShowHint(true)}>Hint</button>
             <button onClick={nextPuzzle}>Next puzzle</button>
           </div>
-          <section className="panel-section">
-            <h3>Puzzle categories</h3>
-            <div className="category-grid">
-              <button
-                className={activeCategory === "all" ? "active" : ""}
-                onClick={() => {
-                  setActiveCategory("all");
-                  setVisiblePuzzleCount(12);
-                }}
-              >
-                All encounters ({puzzles.length})
-              </button>
-              {categories.map((category) => (
-                <button
-                  key={category}
-                  className={activeCategory === category ? "active" : ""}
-                  onClick={() => {
-                    setActiveCategory(category);
-                    setVisiblePuzzleCount(12);
-                    const match = puzzles.find((puzzle) => puzzle.themes?.includes(category));
-                    if (match) {
-                      startPuzzle(match.id, puzzles);
-                    }
-                  }}
-                >
-                  {puzzleThemeLabel(category)}
-                </button>
-              ))}
-            </div>
-          </section>
-          <section className="panel-section">
-            <h3>Puzzle list</h3>
-            <div className="puzzle-list">
-              {visiblePuzzles.map((puzzle) => {
-                const puzzleIndex = puzzles.findIndex((item) => item.id === puzzle.id);
-                return (
-                <button
-                  className={currentPuzzle?.id === puzzle.id ? "active" : ""}
-                  key={puzzle.id}
-                  onClick={() => startPuzzle(puzzle.id, puzzles)}
-                >
-                  {puzzleDisplayTitle(puzzle, puzzleIndex)}
-                </button>
-                );
-              })}
-            </div>
-            <p className="puzzle-list-status">
-              Showing {visiblePuzzles.length} of {filteredPuzzles.length} encounters
-            </p>
-            {visiblePuzzles.length < filteredPuzzles.length && (
-              <button
-                className="puzzle-more"
-                onClick={() => setVisiblePuzzleCount((count) => Math.min(count + 12, filteredPuzzles.length))}
-              >
-                Show more encounters ({filteredPuzzles.length - visiblePuzzles.length} remaining)
-              </button>
-            )}
-          </section>
         </aside>
       </div>
       {successMessage && (
