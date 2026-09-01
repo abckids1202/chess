@@ -1,5 +1,85 @@
 import { fen_to_board, get_legal_moves, make_move } from "./chessEngine";
 
+const THEME_LABELS = Object.freeze({
+  advantage: "Advantage",
+  attraction: "Attraction",
+  backRankMate: "Back-rank mate",
+  capturedDefender: "Captured defender",
+  defensiveMove: "Defensive move",
+  discoveredAttack: "Discovered attack",
+  doubleCheck: "Double check",
+  endgame: "Endgame",
+  fork: "Fork",
+  hangingPiece: "Hanging piece",
+  intermezzo: "In-between move",
+  long: "Long sequence",
+  masterVsMaster: "Master challenge",
+  mate: "Checkmate",
+  mateIn1: "Mate in 1",
+  mateIn2: "Mate in 2",
+  mateIn3: "Mate in 3",
+  middlegame: "Middlegame",
+  oneMove: "One move",
+  pin: "Pin",
+  promotion: "Promotion",
+  sacrifice: "Sacrifice",
+  short: "Short sequence",
+  skewer: "Skewer",
+  trappedPiece: "Trapped piece",
+  veryLong: "Long challenge",
+  zugzwang: "Zugzwang"
+});
+
+const PRIMARY_THEME_ORDER = [
+  "mateIn1",
+  "mateIn2",
+  "mateIn3",
+  "backRankMate",
+  "fork",
+  "pin",
+  "hangingPiece",
+  "trappedPiece",
+  "skewer",
+  "discoveredAttack",
+  "sacrifice",
+  "promotion",
+  "advantage",
+  "mate"
+];
+
+export function puzzleThemeLabel(theme) {
+  const value = String(theme || "").trim();
+  if (!value) {
+    return "Tactical";
+  }
+  if (THEME_LABELS[value]) {
+    return THEME_LABELS[value];
+  }
+  return value
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+export function puzzleThemeLabels(puzzle) {
+  return [...new Set((puzzle?.themes || []).map(puzzleThemeLabel).filter(Boolean))];
+}
+
+export function puzzleDisplayTitle(puzzle, index = 0) {
+  const themes = puzzle?.themes || [];
+  const primaryTheme = PRIMARY_THEME_ORDER.find((theme) => themes.includes(theme)) || themes[0];
+  const label = puzzleThemeLabel(primaryTheme || "tactical");
+  return `${label} Trial ${String(index + 1).padStart(2, "0")}`;
+}
+
+export function puzzleDisplayExplanation(puzzle) {
+  const labels = puzzleThemeLabels(puzzle).slice(0, 2);
+  if (!labels.length) {
+    return "A validated tactical encounter. Look for the forcing move that keeps the initiative.";
+  }
+  return `A ${labels.join(" and ").toLowerCase()} encounter. Look for checks, captures, and threats that keep the initiative.`;
+}
+
 export class PuzzleManager {
   constructor(puzzles = []) {
     this.puzzles = puzzles;

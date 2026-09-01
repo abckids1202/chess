@@ -3,7 +3,14 @@ import { createRoot } from "react-dom/client";
 import { Chess } from "chess.js";
 import { BOT_DEFINITIONS, BOT_LEVELS, BOT_PERSONALITIES, STOCKFISH_LEVELS } from "./bots";
 import { get_legal_moves, make_move } from "./chessEngine";
-import { PuzzleManager, loadPuzzles } from "./puzzleManager";
+import {
+  PuzzleManager,
+  loadPuzzles,
+  puzzleDisplayExplanation,
+  puzzleDisplayTitle,
+  puzzleThemeLabel,
+  puzzleThemeLabels
+} from "./puzzleManager";
 import { BackToTop, CommandPalette, HomePage, ScrollProgress, TopNav } from "./homeComponents";
 import "./styles.css";
 
@@ -1031,6 +1038,7 @@ function BotBattlePage({ onStart }) {
 
 function PuzzlePage() {
   const managerRef = useRef(new PuzzleManager());
+  const advanceTimerRef = useRef(null);
   const [puzzles, setPuzzles] = useState([]);
   const [currentPuzzle, setCurrentPuzzle] = useState(null);
   const [board, setBoard] = useState(new Chess().board());
@@ -1040,8 +1048,17 @@ function PuzzlePage() {
   const [attempts, setAttempts] = useState(0);
   const [showHint, setShowHint] = useState(false);
   const [complete, setComplete] = useState(false);
+  const [successMessage, setSuccessMessage] = useState("");
+  const [activeCategory, setActiveCategory] = useState("all");
+  const [visiblePuzzleCount, setVisiblePuzzleCount] = useState(12);
   const legalTargetSet = new Set(legalTargets.map((move) => move.to));
-  const categories = [...new Set(puzzles.flatMap((puzzle) => puzzle.themes || []))];
+  const categories = [...new Set(puzzles.flatMap((puzzle) => puzzle.themes || []))]
+    .sort((left, right) => puzzleThemeLabel(left).localeCompare(puzzleThemeLabel(right)));
+  const filteredPuzzles = activeCategory === "all"
+    ? puzzles
+    : puzzles.filter((puzzle) => (puzzle.themes || []).includes(activeCategory));
+  const visiblePuzzles = filteredPuzzles.slice(0, visiblePuzzleCount);
+  const currentPuzzleIndex = puzzles.findIndex((puzzle) => puzzle.id === currentPuzzle?.id);
 
   useEffect(() => {
     loadPuzzles()
@@ -1055,9 +1072,19 @@ function PuzzlePage() {
         }
       })
       .catch((error) => setFeedback(error.message));
+
+    return () => {
+      if (advanceTimerRef.current) {
+        window.clearTimeout(advanceTimerRef.current);
+      }
+    };
   }, []);
 
   function startPuzzle(puzzleId, sourcePuzzles = puzzles) {
+    if (advanceTimerRef.current) {
+      window.clearTimeout(advanceTimerRef.current);
+      advanceTimerRef.current = null;
+    }
     const manager = new PuzzleManager(sourcePuzzles);
     const puzzle = manager.start_puzzle(puzzleId);
     managerRef.current = manager;
@@ -1068,8 +1095,32 @@ function PuzzlePage() {
     setAttempts(0);
     setShowHint(false);
     setComplete(false);
+    setSuccessMessage("");
     setFeedback("Find the forcing move.");
     playSound("start");
+  }
+
+  function completePuzzle() {
+    if (complete) {
+      return;
+    }
+    setComplete(true);
+    setSuccessMessage("Good job");
+    setFeedback("Trial complete. Loading the next encounter...");
+    playSound("notify");
+    if (advanceTimerRef.current) {
+      window.clearTimeout(advanceTimerRef.current);
+    }
+    advanceTimerRef.current = window.setTimeout(() => {
+      advanceTimerRef.current = null;
+      if (!puzzles.length || !currentPuzzle) {
+        return;
+      }
+      const sequence = filteredPuzzles.length ? filteredPuzzles : puzzles;
+      const sequenceIndex = sequence.findIndex((puzzle) => puzzle.id === currentPuzzle.id);
+      const nextIndex = (sequenceIndex + 1 + sequence.length) % sequence.length;
+      startPuzzle(sequence[nextIndex].id, puzzles);
+    }, 950);
   }
 
   function squareName(row, col) {
@@ -1132,8 +1183,7 @@ function PuzzlePage() {
     setBoard(manager.game.board());
 
     if (result.complete) {
-      setComplete(true);
-      setFeedback("Puzzle solved.");
+      completePuzzle();
       return;
     }
 
@@ -1146,8 +1196,7 @@ function PuzzlePage() {
         setFeedback("Now find the next winning move.");
       }
       if (manager.is_complete()) {
-        setComplete(true);
-        setFeedback("Puzzle solved.");
+        completePuzzle();
       }
     }, 450);
   }
@@ -1156,9 +1205,10 @@ function PuzzlePage() {
     if (!puzzles.length || !currentPuzzle) {
       return;
     }
-    const currentIndex = puzzles.findIndex((puzzle) => puzzle.id === currentPuzzle.id);
-    const next = puzzles[(currentIndex + 1) % puzzles.length];
-    startPuzzle(next.id);
+    const sequence = filteredPuzzles.length ? filteredPuzzles : puzzles;
+    const currentIndex = sequence.findIndex((puzzle) => puzzle.id === currentPuzzle.id);
+    const next = sequence[(currentIndex + 1 + sequence.length) % sequence.length];
+    startPuzzle(next.id, puzzles);
   }
 
   return (
@@ -1175,18 +1225,21 @@ function PuzzlePage() {
           />
         </div>
         <aside className="game-panel puzzle-panel">
-          <h2>{currentPuzzle?.title || "Validated puzzles"}</h2>
+          <div className="puzzle-heading-row">
+            <h2>{currentPuzzle ? puzzleDisplayTitle(currentPuzzle, currentPuzzleIndex) : "Validated trials"}</h2>
+            <span className="puzzle-count">{puzzles.length} encounters</span>
+          </div>
           <div className="puzzle-meta">
             <span>Rating {currentPuzzle?.rating || "-"}</span>
             <span>{currentPuzzle ? new Chess(currentPuzzle.solver_fen).turn() === "w" ? "white to move" : "black to move" : "-"}</span>
             <span>Attempts {attempts}</span>
           </div>
           <div className="tag-row">
-            {(currentPuzzle?.themes || []).map((tag) => <span key={tag}>{tag}</span>)}
+            {puzzleThemeLabels(currentPuzzle).map((tag) => <span key={tag}>{tag}</span>)}
           </div>
           <p className={complete ? "feedback-good" : "feedback-line"}>{feedback}</p>
           {showHint && <p className="hint-box">{currentPuzzle?.hint}</p>}
-          {complete && <p className="explanation-box">{currentPuzzle?.explanation}</p>}
+          {complete && <p className="explanation-box">{puzzleDisplayExplanation(currentPuzzle)}</p>}
           <div className="puzzle-actions">
             <button onClick={() => setShowHint(true)}>Hint</button>
             <button onClick={nextPuzzle}>Next puzzle</button>
@@ -1194,17 +1247,29 @@ function PuzzlePage() {
           <section className="panel-section">
             <h3>Puzzle categories</h3>
             <div className="category-grid">
+              <button
+                className={activeCategory === "all" ? "active" : ""}
+                onClick={() => {
+                  setActiveCategory("all");
+                  setVisiblePuzzleCount(12);
+                }}
+              >
+                All encounters ({puzzles.length})
+              </button>
               {categories.map((category) => (
                 <button
                   key={category}
+                  className={activeCategory === category ? "active" : ""}
                   onClick={() => {
+                    setActiveCategory(category);
+                    setVisiblePuzzleCount(12);
                     const match = puzzles.find((puzzle) => puzzle.themes?.includes(category));
                     if (match) {
-                      startPuzzle(match.id);
+                      startPuzzle(match.id, puzzles);
                     }
                   }}
                 >
-                  {category}
+                  {puzzleThemeLabel(category)}
                 </button>
               ))}
             </div>
@@ -1212,19 +1277,40 @@ function PuzzlePage() {
           <section className="panel-section">
             <h3>Puzzle list</h3>
             <div className="puzzle-list">
-              {puzzles.map((puzzle) => (
+              {visiblePuzzles.map((puzzle) => {
+                const puzzleIndex = puzzles.findIndex((item) => item.id === puzzle.id);
+                return (
                 <button
                   className={currentPuzzle?.id === puzzle.id ? "active" : ""}
                   key={puzzle.id}
-                  onClick={() => startPuzzle(puzzle.id)}
+                  onClick={() => startPuzzle(puzzle.id, puzzles)}
                 >
-                  {puzzle.title}
+                  {puzzleDisplayTitle(puzzle, puzzleIndex)}
                 </button>
-              ))}
+                );
+              })}
             </div>
+            <p className="puzzle-list-status">
+              Showing {visiblePuzzles.length} of {filteredPuzzles.length} encounters
+            </p>
+            {visiblePuzzles.length < filteredPuzzles.length && (
+              <button
+                className="puzzle-more"
+                onClick={() => setVisiblePuzzleCount((count) => Math.min(count + 12, filteredPuzzles.length))}
+              >
+                Show more encounters ({filteredPuzzles.length - visiblePuzzles.length} remaining)
+              </button>
+            )}
           </section>
         </aside>
       </div>
+      {successMessage && (
+        <div className="puzzle-success" role="status" aria-live="polite">
+          <span className="puzzle-success-mark">✦</span>
+          <strong>{successMessage}</strong>
+          <span>Next encounter loading</span>
+        </div>
+      )}
     </section>
   );
 }
@@ -1872,8 +1958,8 @@ function ProfilePage({ localStats, onRefresh, onOpenAnalysis }) {
           {puzzles.length ? puzzles.map((attempt) => (
             <div className="activity-row" key={attempt.id}>
               <strong className={attempt.solved ? "result-win" : "result-loss"}>{attempt.solved ? "Solved" : "Failed"}</strong>
-              <span>{attempt.puzzle_id} · {attempt.attempts} attempt{attempt.attempts === 1 ? "" : "s"}</span>
-              <small>{attempt.puzzle_rating || "Unrated"} · {(attempt.themes || []).join(", ") || "untagged"}</small>
+              <span>Training encounter · {attempt.attempts} attempt{attempt.attempts === 1 ? "" : "s"}</span>
+              <small>{attempt.puzzle_rating || "Unrated"} · {puzzleThemeLabels({ themes: attempt.themes }).join(", ") || "Tactical"}</small>
             </div>
           )) : <p>No puzzle attempts yet.</p>}
         </div>

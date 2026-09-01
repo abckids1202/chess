@@ -190,12 +190,13 @@ The current local foundation also includes:
 - `puzzles/puzzle_session.py`: UCI-based multi-step puzzle gameplay with forced replies
 - local SQLite profile, game, move, and puzzle-attempt endpoints under `/api/local/*`
 
-The bundled puzzle file currently contains four official Lichess sample records.
-It is a smoke sample, not the full 100-puzzle production set. Download the
-official `lichess_db_puzzle.csv.zst` export into `data/raw`, then import it with:
+The bundled puzzle file currently contains 500 validated records from the
+official Lichess puzzle export. The raw export is kept outside the frontend
+bundle; to refresh or expand the catalog, place a CSV or CSV.ZST export in
+`data/raw` and import it with:
 
 ```bash
-python -m puzzles.puzzle_importer --input data/raw/lichess_db_puzzle.csv.zst --output frontend/public/assets/puzzles/puzzles.json --limit 100
+python -m puzzles.puzzle_importer --input data/raw/lichess_db_puzzle.csv --output frontend/public/assets/puzzles/puzzles.json --limit 500
 ```
 
 The official source is the [Lichess open database](https://database.lichess.org/).

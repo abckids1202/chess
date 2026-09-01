@@ -1125,6 +1125,26 @@ textarea:focus-visible {
   min-height: 640px;
 }
 
+.puzzle-heading-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.puzzle-heading-row h2 {
+  min-width: 0;
+}
+
+.puzzle-count,
+.puzzle-list-status {
+  color: var(--dim);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
 .puzzle-meta,
 .tag-row,
 .puzzle-actions,
@@ -1174,7 +1194,8 @@ textarea:focus-visible {
 
 .puzzle-actions button,
 .category-grid button,
-.puzzle-list button {
+.puzzle-list button,
+.puzzle-more {
   border: 1px solid rgba(255, 185, 56, 0.55);
   border-radius: 8px;
   color: var(--cream);
@@ -1182,8 +1203,73 @@ textarea:focus-visible {
   padding: 9px 12px;
 }
 
+.category-grid button.active,
 .puzzle-list button.active {
   background: rgba(185, 104, 255, 0.58);
+}
+
+.puzzle-list-status {
+  margin: 12px 0 0;
+}
+
+.puzzle-more {
+  margin-top: 10px;
+  color: var(--cyan);
+}
+
+.puzzle-success {
+  position: fixed;
+  z-index: 20;
+  top: 42%;
+  left: 50%;
+  display: grid;
+  gap: 3px;
+  min-width: 190px;
+  padding: 16px 22px;
+  border: 2px solid var(--gold);
+  border-radius: 12px;
+  background: rgba(22, 18, 44, 0.94);
+  box-shadow: 0 0 28px rgba(255, 185, 56, 0.38);
+  color: var(--cream);
+  text-align: center;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  animation: puzzle-success-pop 950ms ease both;
+}
+
+.puzzle-success strong {
+  color: var(--gold);
+  font-size: 24px;
+}
+
+.puzzle-success span:last-child {
+  color: var(--dim);
+  font-size: 12px;
+}
+
+.puzzle-success-mark {
+  color: var(--cyan);
+  font-size: 20px;
+}
+
+@keyframes puzzle-success-pop {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.72);
+  }
+  18% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1.08);
+  }
+  34%,
+  78% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -56%) scale(0.96);
+  }
 }
 
 .tool-panel {
